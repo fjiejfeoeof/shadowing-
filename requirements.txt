@@ -3,3 +3,4 @@ faster-whisper
 torch
 numpy
 yt-dlp
+ffmpeg
