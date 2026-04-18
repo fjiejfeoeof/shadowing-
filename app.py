@@ -1,66 +1,124 @@
 import streamlit as st
-import time
+import base64
+import torch
+from faster_whisper import WhisperModel
+import yt_dlp
+import os
 
-# UIの設定
-st.set_page_config(page_title="TED Shadowing Master", layout="wide")
+# --- 1. AIモデルの準備（キャッシュして高速化） ---
+@st.cache_resource
+def load_model():
+    # CUDAが使えればGPU、なければCPU
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return WhisperModel("base", device=device, compute_type="int8")
 
-# サイドバー設定
-st.sidebar.title("🛠️ Settings")
-difficulty = st.sidebar.selectbox("Difficulty Level", ["Easy", "Normal", "Hard"])
-duration = st.sidebar.slider("Practice Duration (sec)", 5, 30, 15)
+model = load_model()
 
-# 難易度別の判定しきい値
-threshold = {"Easy": 0.8, "Normal": 0.4, "Hard": 0.2}[difficulty]
+# --- 2. 画面設定 ---
+st.set_page_config(page_title="Shadowing Studio AI", layout="wide")
+st.title("🎙️ Ultimate Shadowing Studio")
 
-st.title("🎙️ TED Voice Shadowing Master")
-st.write(f"Current Mode: **{difficulty}** (Target Sync: ±{threshold}s)")
+# サイドバーで難易度設定
+st.sidebar.header("Settings")
+diff_mode = st.sidebar.selectbox("難易度", ["1: Easy", "2: Normal", "3: Hard"])
+threshold = {"1: Easy": 0.8, "2: Normal": 0.4, "3: Hard": 0.2}[diff_mode]
 
-# Step 1: Listening phase
-st.divider()
-st.subheader("Step 1: Listening & Rhythm Check")
-st.info("Listen to the model voice and check the script below.")
+# --- 3. URL入力セクション ---
+url = st.text_input("YouTube または TED の URLを入力してください", placeholder="https://www.youtube.com/watch?v=...")
+sec = st.number_input("練習する秒数", min_value=5, max_value=60, value=15)
 
-# スクリプト表示（サンプル：マララさんのスピーチ）
-sample_text = "When I was a child, I thought changing the world was simple."
-st.markdown(f"### <div style='text-align: center; color: #4ecdc4; padding: 20px;'>\"{sample_text}\"</div>", unsafe_allow_html=True)
+if url:
+    # 音声取得処理
+    if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
+        with st.spinner("音声を生成・解析中..."):
+            try:
+                # yt-dlp設定
+                ydl_opts = {
+                    'format': 'm4a/bestaudio/best',
+                    'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'}],
+                    'outtmpl': 'temp_audio',
+                    'quiet': True,
+                    'external_downloader': 'ffmpeg',
+                    'external_downloader_args': ['-ss', '00:00:00', '-to', f'00:00:{int(sec):02d}']
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                # AI解析（マスターデータ作成）
+                segments, _ = model.transcribe("temp_audio.wav", word_timestamps=True, language="en")
+                st.session_state.master_data = [
+                    {"word": w.word.strip(), "start": w.start, "end": w.end, "dur": w.end - w.start} 
+                    for s in segments for w in s.words
+                ]
+                
+                # 音声のBase64化
+                with open("temp_audio.wav", "rb") as f:
+                    st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
+                
+                st.session_state.last_url = url
+                
+            except Exception as e:
+                st.error(f"エラーが発生しました: {e}")
 
-if st.button("Ready! Start Shadowing"):
-    # Step 2: Shadowing phase
-    st.subheader("Step 2: Shadowing...")
-    
-    # カウントダウン
-    with st.empty():
-        for i in range(3, 0, -1):
-            st.markdown(f"<h1 style='text-align: center;'>🚀 {i}</h1>", unsafe_allow_html=True)
-            time.sleep(1)
-        st.markdown("<h1 style='text-align: center; color: #ff6b6b;'>🔥 GO!</h1>", unsafe_allow_html=True)
-
-    # 進行状況バー
-    progress_bar = st.progress(0)
-    for p in range(100):
-        time.sleep(duration / 100)
-        progress_bar.progress(p + 1)
-    
-    st.success("Recording finished! Analyzing your sync...")
-
-    # Step 3: Precision Analysis Report
-    st.divider()
-    st.subheader("Step 3: Precision Analysis Report")
-    
-    words = sample_text.split()
-    cols = st.columns(len(words))
-    
-    for i, word in enumerate(words):
-        # 判定デモ（実際はここをAI解析結果と連動させる）
-        # 例：3番目の単語で少し遅れた想定
-        lag = 0.04 if i != 2 else 0.45
-        is_ok = abs(lag) < threshold
-        bg_color = "#27ae60" if is_ok else "#e74c3c"
+    # --- 4. ビジュアルガイドUI ---
+    if 'master_data' in st.session_state:
+        st.subheader("Visual Guide & Practice")
         
-        with cols[i]:
-            st.markdown(f"""
-                <div style="background-color:{bg_color}; color:white; padding:10px; border-radius:8px; text-align:center; min-height:80px;">
-                    <div style="font-weight:bold; font-size:16px;">{word}</div>
-                    <div style="font-size:12px; margin-top:5px;">Lag: {lag:+.2f}s</div>
+        subtitle_html = "".join([
+            f'<span id="w{i}" style="font-size:24px; font-weight:bold; display:inline-block; padding:2px 5px; color:white; transition:0.1s;">{m["word"]}</span> ' 
+            for i, m in enumerate(st.session_state.master_data)
+        ])
+
+        st.components.v1.html(f"""
+            <div style="background:#111; padding:30px; border-radius:15px; text-align:center; font-family:sans-serif; color:white;">
+                <div id="status" style="color:#00f2fe; font-weight:bold; margin-bottom:15px;">Ready</div>
+                <div id="scriptArea" style="background:#1a1a1a; padding:20px; border-radius:10px; line-height:2.5;">
+                    {subtitle_html}
                 </div>
-            """, unsafe_allow_html=True)
+                <audio id="player" src="data:audio/wav;base64,{st.session_state.audio_b64}"></audio>
+                <div style="margin-top:20px;">
+                    <button onclick="playDemo()" style="padding:15px 30px; border-radius:30px; cursor:pointer; background:#27ae60; color:white; border:none; font-weight:bold;">🔁 Listen & Guide</button>
+                </div>
+            </div>
+
+            <script>
+                const audio = document.getElementById('player');
+                const masterData = {st.session_state.master_data};
+                
+                function playDemo() {{
+                    audio.currentTime = 0;
+                    audio.play();
+                    draw();
+                }}
+
+                function draw() {{
+                    const ct = audio.currentTime;
+                    masterData.forEach((m, i) => {{
+                        const el = document.getElementById('w' + i);
+                        if (!el) return;
+                        
+                        // 0.75秒前の水色予兆
+                        if (ct >= m.start - 0.75 && ct < m.start) {{
+                            el.style.color = "#00f2fe";
+                            el.style.transform = "scale(1.0)";
+                        }} 
+                        // 再生中ハイライト
+                        else if (ct >= m.start && ct <= m.end) {{
+                            el.style.color = "#f1c40f";
+                            el.style.transform = "scale(1.2)";
+                        }} 
+                        // 通過済みまたは待機
+                        else {{
+                            el.style.color = ct > m.end ? "#666" : "white";
+                            el.style.transform = "scale(1.0)";
+                        }}
+                    }});
+                    if (!audio.paused) requestAnimationFrame(draw);
+                }}
+            </script>
+        """, height=450)
+
+        # --- 5. 判定セクション ---
+        st.divider()
+        st.info("練習が完了したら、ここに録音ファイルをアップロードして採点（開発中）")
