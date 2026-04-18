@@ -33,13 +33,18 @@ if url:
         with st.spinner("音声を生成・解析中..."):
             try:
                 # yt-dlp設定
-                ydl_opts = {
-                    'format': 'm4a/bestaudio/best',
-                    'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'}],
-                    'outtmpl': 'temp_audio',
-                    'quiet': True,
-                    'external_downloader': 'ffmpeg',
-                    'external_downloader_args': ['-ss', '00:00:00', '-to', f'00:00:{int(sec):02d}']
+           ydl_opts = {
+    'format': 'bestaudio/best',  # 形式を限定せず最適なものを選ぶ
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'wav',
+        'preferredquality': '192',
+    }],
+    'outtmpl': 'temp_audio',
+    'quiet': True,
+    # 切り出し時間を指定する引数を、よりエラーの出にくい形式に変更
+    'external_downloader_args': ['-ss', '0', '-t', str(sec), '-loglevel', 'error']
+}
                 }
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
