@@ -31,13 +31,25 @@ if url:
                 if os.path.exists("temp_audio.wav"):
                     os.remove("temp_audio.wav")
 
+               # yt-dlp設定 (もっとも拒否されにくいシンプル設定)
                 ydl_opts = {
                     'format': 'bestaudio/best',
-                    'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'wav','preferredquality': '192'}],
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'wav',
+                        'preferredquality': '192',
+                    }],
                     'outtmpl': 'temp_audio',
                     'quiet': True,
-                    'external_downloader': 'ffmpeg',
-                    'external_downloader_args': ['-ss', '0', '-t', str(sec), '-loglevel', 'error', '-force_keyframes_at_cuts']
+                    # ここがポイント：外側のダウンローダーを使わず、yt-dlpに任せる
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                # ダウンロード後にffmpegで指定秒数にカットする（確実な方法）
+                os.system(f"ffmpeg -i temp_audio.wav -ss 0 -t {sec} -c copy temp_cut.wav -y")
+                os.rename("temp_cut.wav", "temp_audio.wav")
                 }
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
