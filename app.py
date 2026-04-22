@@ -130,67 +130,82 @@ if url:
         st.components.v1.html(html_code, height=500)
 
         # --- 5. 採点システム ---
-        # --- 5. 採点システム (高速・確実版) ---
-        # ブラウザからPythonへデータを送るための隠し入力
-        audio_data = st.text_input("audio_transport", label_visibility="collapsed", key="audio_transport")
+        # --- 5. 採点システム (超・確実版) ---
+        # 修正：labelを付けて確実に認識させる（隠すのはCSSで行う）
+        audio_transport = st.text_input("audio_transport", key="audio_transport_input")
 
         st.markdown("""
+            <style>
+                /* 入力欄を完全に非表示にする */
+                div[data-testid="stTextInput"]:has(input[aria-label="audio_transport"]) {
+                    display: none;
+                }
+            </style>
             <script>
             window.addEventListener('message', function(event) {
                 if (event.data.type === 'UPLOAD_AUDIO') {
-                    // 1. データを取得
+                    console.log("Audio data received in JS"); // デバッグ用ログ
                     const base64Data = event.data.data.split(',')[1];
-                    // 2. Streamlitの入力欄を特定して値をセット
+                    
+                    // すべての親ウィンドウの入力を検索
                     const inputs = window.parent.document.querySelectorAll('input');
+                    let found = false;
                     for (let input of inputs) {
+                        // keyで指定した名前がaria-labelに入ることが多い
                         if (input.getAttribute('aria-label') === 'audio_transport') {
                             input.value = base64Data;
-                            // 3. 入力イベントを強制発生させてStreamlitに通知
                             input.dispatchEvent(new Event('input', { bubbles: true }));
+                            found = true;
+                            console.log("Data injected into Streamlit input");
                             break;
                         }
                     }
+                    if(!found) console.error("Streamlit input field not found!");
                 }
             });
             </script>
         """, unsafe_allow_html=True)
         
-        if audio_data:
-            # 処理に入ったらすぐに画面上の文字を変える
+        # 修正：値が本当に入ってきた時だけ重い処理を開始する
+        if audio_transport and len(audio_transport) > 100:
             with st.spinner("AI採点中... (Whisper解析 & 照合)"):
                 try:
                     # 録音ファイルの保存
+                    raw_audio = base64.b64decode(audio_transport)
                     with open("user_rec.wav", "wb") as f:
-                        f.write(base64.b64decode(audio_data))
+                        f.write(raw_audio)
                     
-                    # AI文字起こし (最速設定)
+                    # AI文字起こし (高速設定)
                     user_res, _ = model.transcribe("user_rec.wav", language="en", beam_size=1)
                     user_text = " ".join([s.text for s in user_res]).lower().strip()
                     
-                    # 採点ロジック
-                    m_words = [m['word'].lower().replace('.', '').replace(',', '') for m in st.session_state.master_data]
-                    u_words = user_text.split()
-                    
-                    st.subheader("Shadowing Result")
-                    # 結果をきれいに並べる (画面幅に合わせて調整)
-                    result_html = '<div style="display: flex; flex-wrap: wrap; gap: 10px; background: #1a1a1a; padding: 20px; border-radius: 10px;">'
-                    score = 0
-                    for m_w in m_words:
-                        # 判定
-                        is_match = any(difflib.SequenceMatcher(None, m_w, u_w).ratio() > threshold for u_w in u_words)
-                        color = "#2ecc71" if is_match else "#e74c3c"
-                        if is_match: score += 1
-                        result_html += f'<span style="color:{color}; font-size: 20px; font-weight: bold;">{m_w}</span>'
-                    result_html += '</div>'
-                    
-                    st.markdown(result_html, unsafe_allow_html=True)
-                    
-                    # スコア表示
-                    final_score = int((score / len(m_words)) * 100)
-                    st.metric("達成度", f"{final_score}%")
-                    if final_score >= 80:
-                        st.balloons()
-                        st.success("素晴らしい！ネイティブに近いリズムです！")
+                    if not user_text:
+                        st.warning("音声がうまく聞き取れませんでした。マイクの近くで話してみてください。")
+                    else:
+                        # 採点ロジック (句読点を除去)
+                        m_words = [m['word'].lower().strip('.,!?') for m in st.session_state.master_data]
+                        u_words = user_text.split()
+                        
+                        st.subheader("Shadowing Result")
+                        result_html = '<div style="display: flex; flex-wrap: wrap; gap: 10px; background: #1a1a1a; padding: 20px; border-radius: 10px;">'
+                        score = 0
+                        for m_w in m_words:
+                            is_match = any(difflib.SequenceMatcher(None, m_w, u_w.strip('.,!?')).ratio() > threshold for u_w in u_words)
+                            color = "#2ecc71" if is_match else "#e74c3c"
+                            if is_match: score += 1
+                            result_html += f'<span style="color:{color}; font-size: 20px; font-weight: bold;">{m_w}</span>'
+                        result_html += '</div>'
+                        
+                        st.markdown(result_html, unsafe_allow_html=True)
+                        
+                        final_score = int((score / len(m_words)) * 100)
+                        st.metric("達成度", f"{final_score}%")
+                        if final_score >= 80:
+                            st.balloons()
+                            st.success("素晴らしい！ネイティブに近いリズムです！")
+                        
+                        # 処理が終わったら入力をクリアするためにリセット（任意）
+                        # st.rerun() 
                         
                 except Exception as e:
-                    st.error(f"採点エラー: {e}")
+                    st.error(f"採点エラーが発生しました: {e}")
