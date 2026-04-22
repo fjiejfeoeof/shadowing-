@@ -5,6 +5,7 @@ from faster_whisper import WhisperModel
 import yt_dlp
 import os
 import difflib
+import json
 
 # --- 1. AIモデルの準備 ---
 @st.cache_resource
@@ -49,15 +50,19 @@ if url:
                 st.session_state.last_url = url
             except Exception as e: st.error(f"Error: {e}")
 
-    # --- 4. ビジュアルガイド (ハイライト機能復活) ---
+    # --- 4. ビジュアルガイド ---
     if 'master_data' in st.session_state:
         sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
         
-        st.components.v1.html(f"""
+        # JSに渡すデータをJSON形式に変換
+        json_data = json.dumps(st.session_state.master_data)
+        
+        # 修正ポイント：f-stringを使わず、.replace() でデータを流し込む
+        html_code = """
             <div style="background:#111; padding:30px; border-radius:15px; text-align:center; color:white; font-family:sans-serif;">
                 <div id="status" style="color:#00f2fe; margin-bottom:15px; font-weight:bold;">Ready</div>
-                <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">{sub_html}</div>
-                <audio id="player" src="data:audio/wav;base64,{st.session_state.audio_b64}"></audio>
+                <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">SUBTITLE_HERE</div>
+                <audio id="player" src="data:audio/wav;base64,AUDIO_B64_HERE"></audio>
                 
                 <button onclick="playDemo()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🔁 Listen & Guide</button>
                 <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px; margin-left:10px;">🎤 Record Start</button>
@@ -65,63 +70,59 @@ if url:
 
             <script>
                 const audio = document.getElementById('player');
-                const masterData = {st.session_state.master_data};
+                const masterData = JSON_DATA_HERE;
                 let mediaRecorder; let audioChunks = [];
 
-                function playDemo() {{ audio.currentTime = 0; audio.play(); draw(); }}
+                function playDemo() { audio.currentTime = 0; audio.play(); draw(); }
 
-                function draw() {{
+                function draw() {
                     const ct = audio.currentTime;
-                    masterData.forEach((m, i) => {{
+                    masterData.forEach((m, i) => {
                         const el = document.getElementById('w' + i);
                         if (!el) return;
-                        
-                        // 1. 水色予兆 (0.75秒前から)
-                        if (ct >= m.start - 0.75 && ct < m.start) {{
+                        if (ct >= m.start - 0.75 && ct < m.start) {
                             el.style.color = "#00f2fe";
                             el.style.backgroundColor = "transparent";
                             el.style.transform = "scale(1.0)";
-                        }}
-                        // 2. ハイライト (Colab再現: 背景黄色 & 文字黒)
-                        else if (ct >= m.start && ct <= m.end) {{
+                        } else if (ct >= m.start && ct <= m.end) {
                             el.style.color = "#000";
                             el.style.backgroundColor = "#f1c40f";
                             el.style.transform = "scale(1.15)";
-                        }}
-                        // 3. 読了後 or 待機
-                        else {{
+                        } else {
                             el.style.color = ct > m.end ? "#555" : "#fff";
                             el.style.backgroundColor = "transparent";
                             el.style.transform = "scale(1.0)";
-                        }}
-                    }});
+                        }
+                    });
                     if (!audio.paused) requestAnimationFrame(draw);
-                }}
+                }
 
-                async function toggleRec() {{
+                async function toggleRec() {
                     const btn = document.getElementById('recBtn');
-                    if (!mediaRecorder || mediaRecorder.state === "inactive") {{
-                        const stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+                    if (!mediaRecorder || mediaRecorder.state === "inactive") {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                         mediaRecorder = new MediaRecorder(stream);
                         mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-                        mediaRecorder.onstop = () => {{
-                            const blob = new Blob(audioChunks, {{ type: 'audio/wav' }});
+                        mediaRecorder.onstop = () => {
+                            const blob = new Blob(audioChunks, { type: 'audio/wav' });
                             const reader = new FileReader();
                             reader.readAsDataURL(blob);
-                            reader.onloadend = () => {{
-                                window.parent.postMessage({{type: 'UPLOAD_AUDIO', data: reader.result}}, '*');
-                            }};
+                            reader.onloadend = () => {
+                                window.parent.postMessage({type: 'UPLOAD_AUDIO', data: reader.result}, '*');
+                            };
                             audioChunks = [];
-                        }};
+                        };
                         mediaRecorder.start();
                         btn.innerText = "🛑 Stop & Score"; btn.style.background = "#95a5a6";
-                    }} else {{
+                    } else {
                         mediaRecorder.stop();
                         btn.innerText = "🎤 Record Start"; btn.style.background = "#e74c3c";
-                    }}
-                }}
+                    }
+                }
             </script>
-        """, height=500)
+        """.replace("SUBTITLE_HERE", sub_html).replace("AUDIO_B64_HERE", st.session_state.audio_b64).replace("JSON_DATA_HERE", json_data)
+        
+        st.components.v1.html(html_code, height=500)
 
         # --- 5. 採点システム ---
         st.markdown("""<script>
