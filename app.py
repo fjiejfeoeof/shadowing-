@@ -50,30 +50,32 @@ if url:
                 st.session_state.last_url = url
             except Exception as e: st.error(f"Error: {e}")
 
-    # --- 4. ビジュアルガイド ---
+    # --- 4. ビジュアルガイド (録音と再生の同期版) ---
     if 'master_data' in st.session_state:
         sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
-        
-        # JSに渡すデータをJSON形式に変換
         json_data = json.dumps(st.session_state.master_data)
         
-        # 修正ポイント：f-stringを使わず、.replace() でデータを流し込む
         html_code = """
             <div style="background:#111; padding:30px; border-radius:15px; text-align:center; color:white; font-family:sans-serif;">
                 <div id="status" style="color:#00f2fe; margin-bottom:15px; font-weight:bold;">Ready</div>
                 <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">SUBTITLE_HERE</div>
                 <audio id="player" src="data:audio/wav;base64,AUDIO_B64_HERE"></audio>
                 
-                <button onclick="playDemo()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🔁 Listen & Guide</button>
-                <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px; margin-left:10px;">🎤 Record Start</button>
+                <div style="display: flex; justify-content: center; gap: 15px;">
+                    <button onclick="playOnly()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🔁 Listen (No Rec)</button>
+                    <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🎙️ Start Shadowing</button>
+                </div>
             </div>
 
             <script>
                 const audio = document.getElementById('player');
                 const masterData = JSON_DATA_HERE;
+                const status = document.getElementById('status');
                 let mediaRecorder; let audioChunks = [];
 
-                function playDemo() { audio.currentTime = 0; audio.play(); draw(); }
+                function playOnly() {
+                    audio.currentTime = 0; audio.play(); draw();
+                }
 
                 function draw() {
                     const ct = audio.currentTime;
@@ -82,19 +84,14 @@ if url:
                         if (!el) return;
                         if (ct >= m.start - 0.75 && ct < m.start) {
                             el.style.color = "#00f2fe";
-                            el.style.backgroundColor = "transparent";
-                            el.style.transform = "scale(1.0)";
                         } else if (ct >= m.start && ct <= m.end) {
-                            el.style.color = "#000";
-                            el.style.backgroundColor = "#f1c40f";
-                            el.style.transform = "scale(1.15)";
+                            el.style.color = "#000"; el.style.backgroundColor = "#f1c40f"; el.style.transform = "scale(1.15)";
                         } else {
-                            el.style.color = ct > m.end ? "#555" : "#fff";
-                            el.style.backgroundColor = "transparent";
-                            el.style.transform = "scale(1.0)";
+                            el.style.color = ct > m.end ? "#555" : "#fff"; el.style.backgroundColor = "transparent"; el.style.transform = "scale(1.0)";
                         }
                     });
                     if (!audio.paused) requestAnimationFrame(draw);
+                    else if (audio.currentTime >= audio.duration) { status.innerText = "Processing..."; }
                 }
 
                 async function toggleRec() {
@@ -112,11 +109,19 @@ if url:
                             };
                             audioChunks = [];
                         };
+                        
+                        // 録音開始と同時にお手本を再生
                         mediaRecorder.start();
+                        audio.currentTime = 0;
+                        audio.play();
+                        draw();
+                        
                         btn.innerText = "🛑 Stop & Score"; btn.style.background = "#95a5a6";
+                        status.innerText = "🔴 Recording & Playing...";
                     } else {
                         mediaRecorder.stop();
-                        btn.innerText = "🎤 Record Start"; btn.style.background = "#e74c3c";
+                        audio.pause();
+                        btn.innerText = "🎙️ Start Shadowing"; btn.style.background = "#e74c3c";
                     }
                 }
             </script>
@@ -155,4 +160,6 @@ if url:
                     if is_match: score += 1
                     cols[i % 10].markdown(f"<span style='color:{color}; font-weight:bold;'>{m_w}</span>", unsafe_allow_html=True)
                 
-                st.metric("Score", f"{int((score / len(m_words)) * 100)}%")
+                final_score = int((score / len(m_words)) * 100)
+                st.metric("Score", f"{final_score}%")
+                if final_score >= 80: st.balloons()
