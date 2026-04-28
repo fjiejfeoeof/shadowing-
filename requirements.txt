@@ -3,4 +3,5 @@ faster-whisper
 torch
 numpy
 yt-dlp
-
+ffmpeg-python
+# 他、必要なライブラリ
