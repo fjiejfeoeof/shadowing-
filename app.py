@@ -130,59 +130,60 @@ if url:
         st.components.v1.html(html_code, height=500)
 
         # --- 5. 採点システム ---
-        # --- 5. 採点システム (超・確実版) ---
-        # 修正：labelを付けて確実に認識させる（隠すのはCSSで行う）
-        audio_transport = st.text_input("audio_transport", key="audio_transport_input")
+       # --- 5. 採点システム (超・確実版) ---
+        # 修正ポイント1: ラベルをユニークで分かりやすいものにする
+        audio_transport = st.text_input("TARGET_INPUT_FOR_AUDIO", key="audio_transport_input")
 
         st.markdown("""
             <style>
                 /* 入力欄を完全に非表示にする */
-                div[data-testid="stTextInput"]:has(input[aria-label="audio_transport"]) {
+                div[data-testid="stTextInput"]:has(input[aria-label="TARGET_INPUT_FOR_AUDIO"]) {
                     display: none;
                 }
             </style>
             <script>
             window.addEventListener('message', function(event) {
                 if (event.data.type === 'UPLOAD_AUDIO') {
-                    console.log("Audio data received in JS"); // デバッグ用ログ
                     const base64Data = event.data.data.split(',')[1];
                     
-                    // すべての親ウィンドウの入力を検索
-                    const inputs = window.parent.document.querySelectorAll('input');
-                    let found = false;
-                    for (let input of inputs) {
-                        // keyで指定した名前がaria-labelに入ることが多い
-                        if (input.getAttribute('aria-label') === 'audio_transport') {
-                            input.value = base64Data;
-                            input.dispatchEvent(new Event('input', { bubbles: true }));
-                            found = true;
-                            console.log("Data injected into Streamlit input");
+                    // 修正ポイント2: window.parent.document から全入力を探す
+                    const allInputs = window.parent.document.querySelectorAll('input');
+                    let targetInput = null;
+                    
+                    for (let input of allInputs) {
+                        if (input.getAttribute('aria-label') === 'TARGET_INPUT_FOR_AUDIO') {
+                            targetInput = input;
                             break;
                         }
                     }
-                    if(!found) console.error("Streamlit input field not found!");
+
+                    if (targetInput) {
+                        targetInput.value = base64Data;
+                        targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        console.log("✅ Audio data injected successfully");
+                    } else {
+                        console.error("❌ Target input not found!");
+                    }
                 }
             });
             </script>
         """, unsafe_allow_html=True)
         
-        # 修正：値が本当に入ってきた時だけ重い処理を開始する
+        # 修正ポイント3: データが入ってきたら即座に判定
         if audio_transport and len(audio_transport) > 100:
-            with st.spinner("AI採点中... (Whisper解析 & 照合)"):
+            with st.spinner("AI採点中..."):
                 try:
                     # 録音ファイルの保存
-                    raw_audio = base64.b64decode(audio_transport)
                     with open("user_rec.wav", "wb") as f:
-                        f.write(raw_audio)
+                        f.write(base64.b64decode(audio_transport))
                     
-                    # AI文字起こし (高速設定)
+                    # AI文字起こし
                     user_res, _ = model.transcribe("user_rec.wav", language="en", beam_size=1)
                     user_text = " ".join([s.text for s in user_res]).lower().strip()
                     
                     if not user_text:
-                        st.warning("音声がうまく聞き取れませんでした。マイクの近くで話してみてください。")
+                        st.warning("音声が検出できませんでした。もう一度録音してみてください。")
                     else:
-                        # 採点ロジック (句読点を除去)
                         m_words = [m['word'].lower().strip('.,!?') for m in st.session_state.master_data]
                         u_words = user_text.split()
                         
@@ -200,12 +201,7 @@ if url:
                         
                         final_score = int((score / len(m_words)) * 100)
                         st.metric("達成度", f"{final_score}%")
-                        if final_score >= 80:
-                            st.balloons()
-                            st.success("素晴らしい！ネイティブに近いリズムです！")
-                        
-                        # 処理が終わったら入力をクリアするためにリセット（任意）
-                        # st.rerun() 
+                        if final_score >= 80: st.balloons()
                         
                 except Exception as e:
-                    st.error(f"採点エラーが発生しました: {e}")
+                    st.error(f"採点中にエラーが発生しました: {e}")
