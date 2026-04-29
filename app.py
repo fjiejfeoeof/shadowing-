@@ -6,7 +6,7 @@ import yt_dlp
 import os
 import difflib
 import json
-import subprocess  # 追加：エラー検知を強化するため
+import subprocess
 
 # --- 1. AIモデルの準備 ---
 @st.cache_resource
@@ -25,19 +25,16 @@ diff_mode = st.sidebar.selectbox("難易度", ["1: Easy", "2: Normal", "3: Hard"
 threshold = {"1: Easy": 0.8, "2: Normal": 0.4, "3: Hard": 0.2}[diff_mode]
 
 # --- 3. URL入力 & 音声解析 ---
-url = st.text_input("YouTube または TED の URLを入力してください")
+url = st.text_input("YouTube / TED / Podcast の URLを入力してください")
 sec = st.number_input("練習する秒数", min_value=5, max_value=60, value=15)
 
 if url:
     if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
-        with st.spinner("お手本を準備中... (これには1〜2分かかる場合があります)"):
+        with st.spinner("お手本を準備中..."):
             try:
                 # 一時ファイルの削除
                 for f in ["temp_audio.wav", "temp_full.wav"]:
                     if os.path.exists(f): os.remove(f)
-
-                # ダウンロード設定
-                # --- 3. URL入力 & 音声解析 の tryブロック内を修正 ---
 
                 # ダウンロード設定（Apple Podcasts / BBC 対応強化版）
                 ydl_opts = {
@@ -46,7 +43,6 @@ if url:
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': 'in_playlist', 
-                    # 以下の設定を追加：対応していないURLでも、力技で中身のメディアを探す設定
                     'force_generic_extractor': True, 
                     'outtmpl': 'temp_full',
                     'postprocessors': [{
@@ -54,7 +50,6 @@ if url:
                         'preferredcodec': 'wav',
                         'preferredquality': '192',
                     }],
-                }
                 }
 
                 # ダウンロード実行
@@ -66,9 +61,9 @@ if url:
                 output_file = "temp_audio.wav"
 
                 if not os.path.exists(input_file):
-                    st.error("音声の取得に失敗しました。URLが正しいか確認してください。")
+                    st.error("音声の取得に失敗しました。URLが正しいか、対応しているか確認してください。")
                 else:
-                    # ffmpegでカット (subprocessを使って確実に実行)
+                    # ffmpegでカット
                     cmd = ["ffmpeg", "-i", input_file, "-ss", "0", "-t", str(sec), "-c", "copy", output_file, "-y"]
                     subprocess.run(cmd, check=True, capture_output=True)
 
@@ -89,7 +84,6 @@ if url:
 
     # --- 4. ビジュアルガイド ---
     if 'master_data' in st.session_state:
-        # (以下、以前のHTML/JavaScriptコードと同じ)
         sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
         json_data = json.dumps(st.session_state.master_data)
         
@@ -148,7 +142,7 @@ if url:
         """.replace("SUBTITLE_HERE", sub_html).replace("AUDIO_B64_HERE", st.session_state.audio_b64).replace("JSON_DATA_HERE", json_data)
         st.components.v1.html(html_code, height=500)
 
-        # --- 5. 採点システム (前回提示の通り) ---
+        # --- 5. 採点システム ---
         audio_transport = st.text_input("TARGET_INPUT_FOR_AUDIO", key="audio_transport_input")
         st.markdown("""
             <style>div[data-testid="stTextInput"]:has(input[aria-label="TARGET_INPUT_FOR_AUDIO"]) { display: none; }</style>
@@ -175,9 +169,7 @@ if url:
                         f.write(base64.b64decode(audio_transport))
                     user_res, _ = model.transcribe("user_rec.wav", language="en", beam_size=1)
                     user_text = " ".join([s.text for s in user_res]).lower().strip()
-                    if not user_text:
-                        st.warning("音声が検出できませんでした。")
-                    else:
+                    if user_text:
                         m_words = [m['word'].lower().strip('.,!?') for m in st.session_state.master_data]
                         u_words = user_text.split()
                         st.subheader("Shadowing Result")
@@ -190,8 +182,6 @@ if url:
                             result_html += f'<span style="color:{color}; font-size: 20px; font-weight: bold;">{m_w}</span>'
                         result_html += '</div>'
                         st.markdown(result_html, unsafe_allow_html=True)
-                        final_score = int((score / len(m_words)) * 100)
-                        st.metric("達成度", f"{final_score}%")
-                        if final_score >= 80: st.balloons()
+                        st.metric("達成度", f"{int((score / len(m_words)) * 100)}%")
                 except Exception as e:
                     st.error(f"採点エラー: {e}")
