@@ -28,28 +28,47 @@ url = st.text_input("YouTube または TED の URLを入力してください")
 sec = st.number_input("練習する秒数", min_value=5, max_value=60, value=15)
 
 if url:
-    if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
-        with st.spinner("お手本を準備中..."):
-            try:
-                if os.path.exists("temp_audio.wav"): os.remove("temp_audio.wav")
-                if os.path.exists("temp_full.wav"): os.remove("temp_full.wav")
-                
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'nocheckcertificate': True,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extract_flat': False,
-                    'ignoreerrors': True,
-                    'referer': url,
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'wav',
-                        'preferredquality': '192'
-                    }],
-                    'outtmpl': 'temp_full',
-                }
+            if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
+                with st.spinner("お手本を準備中..."):
+                    try:
+                        # 一時ファイルの削除
+                        if os.path.exists("temp_audio.wav"): os.remove("temp_audio.wav")
+                        if os.path.exists("temp_full.wav"): os.remove("temp_full.wav")
+
+                        # BBC/YouTube/TED対応の最強設定
+                        ydl_opts = {
+                            'format': 'bestaudio/best',
+                            'nocheckcertificate': True,
+                            'quiet': True,
+                            'no_warnings': True,
+                            'extract_flat': False,
+                            'ignoreerrors': True,
+                            'referer': url,
+                            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                            'postprocessors': [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'wav',
+                                'preferredquality': '192'
+                            }],
+                            'outtmpl': 'temp_full',
+                        }
+
+                        # ダウンロード実行
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([url])
+
+                        # 音声カットと文字起こし（ここにお手持ちのffmpegとtranscribeのコードを続けてください）
+                        os.system(f"ffmpeg -i temp_full.wav -ss 0 -t {sec} -c copy temp_audio.wav -y")
+                        segments, _ = model.transcribe("temp_audio.wav", word_timestamps=True, language="en")
+                        
+                        # セッション状態の更新
+                        st.session_state.master_data = [{"word": w.word.strip(), "start": w.start, "end": w.end} for s in segments for w in s.words]
+                        with open("temp_audio.wav", "rb") as f:
+                            st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
+                        st.session_state.last_url = url
+
+                    except Exception as e:
+                        st.error(f"Error: {e}")
     # --- 4. ビジュアルガイド (録音と再生の同期版) ---
     if 'master_data' in st.session_state:
         sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
