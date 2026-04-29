@@ -70,7 +70,7 @@ if url:
                     except Exception as e:
                         st.error(f"Error: {e}")
     # --- 4. ビジュアルガイド (録音と再生の同期版) ---
-    if 'master_data' in st.session_state:
+            if 'master_data' in st.session_state:
         sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
         json_data = json.dumps(st.session_state.master_data)
         
