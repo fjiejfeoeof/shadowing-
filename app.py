@@ -28,49 +28,50 @@ url = st.text_input("YouTube または TED の URLを入力してください")
 sec = st.number_input("練習する秒数", min_value=5, max_value=60, value=15)
 
 if url:
-            if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
-                with st.spinner("お手本を準備中..."):
-                    try:
-                        # 一時ファイルの削除
-                        if os.path.exists("temp_audio.wav"): os.remove("temp_audio.wav")
-                        if os.path.exists("temp_full.wav"): os.remove("temp_full.wav")
+    if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
+        with st.spinner("お手本を準備中..."):
+            try:
+                # 一時ファイルの削除
+                if os.path.exists("temp_audio.wav"): os.remove("temp_audio.wav")
+                if os.path.exists("temp_full.wav"): os.remove("temp_full.wav")
 
-                        # BBC/YouTube/TED対応の最強設定
-                        ydl_opts = {
-                            'format': 'bestaudio/best',
-                            'nocheckcertificate': True,
-                            'quiet': True,
-                            'no_warnings': True,
-                            'extract_flat': False,
-                            'ignoreerrors': True,
-                            'referer': url,
-                            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                            'postprocessors': [{
-                                'key': 'FFmpegExtractAudio',
-                                'preferredcodec': 'wav',
-                                'preferredquality': '192'
-                            }],
-                            'outtmpl': 'temp_full',
-                        }
+                # BBC/YouTube/TED対応の最強設定
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'nocheckcertificate': True,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': False,
+                    'ignoreerrors': True,
+                    'referer': url,
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'wav',
+                        'preferredquality': '192'
+                    }],
+                    'outtmpl': 'temp_full',
+                }
 
-                        # ダウンロード実行
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([url])
+                # ダウンロード実行
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
 
-                        # 音声カットと文字起こし（ここにお手持ちのffmpegとtranscribeのコードを続けてください）
-                        os.system(f"ffmpeg -i temp_full.wav -ss 0 -t {sec} -c copy temp_audio.wav -y")
-                        segments, _ = model.transcribe("temp_audio.wav", word_timestamps=True, language="en")
-                        
-                        # セッション状態の更新
-                        st.session_state.master_data = [{"word": w.word.strip(), "start": w.start, "end": w.end} for s in segments for w in s.words]
-                        with open("temp_audio.wav", "rb") as f:
-                            st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
-                        st.session_state.last_url = url
+                # 音声カットと文字起こし
+                os.system(f"ffmpeg -i temp_full.wav -ss 0 -t {sec} -c copy temp_audio.wav -y")
+                segments, _ = model.transcribe("temp_audio.wav", word_timestamps=True, language="en")
+                
+                # セッション状態の更新
+                st.session_state.master_data = [{"word": w.word.strip(), "start": w.start, "end": w.end} for s in segments for w in s.words]
+                with open("temp_audio.wav", "rb") as f:
+                    st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
+                st.session_state.last_url = url
 
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
     # --- 4. ビジュアルガイド (録音と再生の同期版) ---
-            if 'master_data' in st.session_state:
+    if 'master_data' in st.session_state:
         sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
         json_data = json.dumps(st.session_state.master_data)
         
@@ -129,7 +130,6 @@ if url:
                             audioChunks = [];
                         };
                         
-                        // 録音開始と同時にお手本を再生
                         mediaRecorder.start();
                         audio.currentTime = 0;
                         audio.play();
@@ -149,13 +149,10 @@ if url:
         st.components.v1.html(html_code, height=500)
 
         # --- 5. 採点システム ---
-       # --- 5. 採点システム (超・確実版) ---
-        # 修正ポイント1: ラベルをユニークで分かりやすいものにする
         audio_transport = st.text_input("TARGET_INPUT_FOR_AUDIO", key="audio_transport_input")
 
         st.markdown("""
             <style>
-                /* 入力欄を完全に非表示にする */
                 div[data-testid="stTextInput"]:has(input[aria-label="TARGET_INPUT_FOR_AUDIO"]) {
                     display: none;
                 }
@@ -164,39 +161,29 @@ if url:
             window.addEventListener('message', function(event) {
                 if (event.data.type === 'UPLOAD_AUDIO') {
                     const base64Data = event.data.data.split(',')[1];
-                    
-                    // 修正ポイント2: window.parent.document から全入力を探す
                     const allInputs = window.parent.document.querySelectorAll('input');
                     let targetInput = null;
-                    
                     for (let input of allInputs) {
                         if (input.getAttribute('aria-label') === 'TARGET_INPUT_FOR_AUDIO') {
                             targetInput = input;
                             break;
                         }
                     }
-
                     if (targetInput) {
                         targetInput.value = base64Data;
                         targetInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        console.log("✅ Audio data injected successfully");
-                    } else {
-                        console.error("❌ Target input not found!");
                     }
                 }
             });
             </script>
         """, unsafe_allow_html=True)
         
-        # 修正ポイント3: データが入ってきたら即座に判定
         if audio_transport and len(audio_transport) > 100:
             with st.spinner("AI採点中..."):
                 try:
-                    # 録音ファイルの保存
                     with open("user_rec.wav", "wb") as f:
                         f.write(base64.b64decode(audio_transport))
                     
-                    # AI文字起こし
                     user_res, _ = model.transcribe("user_rec.wav", language="en", beam_size=1)
                     user_text = " ".join([s.text for s in user_res]).lower().strip()
                     
@@ -217,7 +204,6 @@ if url:
                         result_html += '</div>'
                         
                         st.markdown(result_html, unsafe_allow_html=True)
-                        
                         final_score = int((score / len(m_words)) * 100)
                         st.metric("達成度", f"{final_score}%")
                         if final_score >= 80: st.balloons()
