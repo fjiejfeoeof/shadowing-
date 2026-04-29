@@ -37,17 +37,24 @@ if url:
                     if os.path.exists(f): os.remove(f)
 
                 # ダウンロード設定
+                # --- 3. URL入力 & 音声解析 の tryブロック内を修正 ---
+
+                # ダウンロード設定（Apple Podcasts / BBC 対応強化版）
                 ydl_opts = {
                     'format': 'bestaudio/best',
                     'nocheckcertificate': True,
                     'quiet': True,
                     'no_warnings': True,
-                    'outtmpl': 'temp_full', # 拡張子は自動で付く場合があるため注意
+                    'extract_flat': 'in_playlist', 
+                    # 以下の設定を追加：対応していないURLでも、力技で中身のメディアを探す設定
+                    'force_generic_extractor': True, 
+                    'outtmpl': 'temp_full',
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'wav',
                         'preferredquality': '192',
                     }],
+                }
                 }
 
                 # ダウンロード実行
