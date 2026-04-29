@@ -67,7 +67,7 @@ if url:
                             st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
                         st.session_state.last_url = url
 
-                    except Exception as e:
+                　　 except Exception as e:
                         st.error(f"Error: {e}")
     # --- 4. ビジュアルガイド (録音と再生の同期版) ---
     if 'master_data' in st.session_state:
