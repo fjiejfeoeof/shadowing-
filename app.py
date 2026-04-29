@@ -30,20 +30,20 @@ sec = st.number_input("練習する秒数", min_value=5, max_value=60, value=15)
 
 if url:
     if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
-        with st.spinner("お手本を準備中..."):
+        with st.spinner("お手本を準備中... (数分かかる場合があります)"):
             try:
                 # 一時ファイルの削除
                 for f in ["temp_audio.wav", "temp_full.wav"]:
                     if os.path.exists(f): os.remove(f)
 
-                # ダウンロード設定（Apple Podcasts / BBC 対応強化版）
+                # ダウンロード設定（Apple Podcasts / BBC 最強化版）
                 ydl_opts = {
                     'format': 'bestaudio/best',
                     'nocheckcertificate': True,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extract_flat': 'in_playlist', 
-                    'force_generic_extractor': True, 
+                    'quiet': False, # ログを出して状況を把握しやすくする
+                    'no_warnings': False,
+                    'extract_flat': False, 
+                    'force_generic_extractor': True, # これが重要
                     'outtmpl': 'temp_full',
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
@@ -56,12 +56,11 @@ if url:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
-                # ファイル名の確定（yt-dlpが .wav を自動付与するため）
                 input_file = "temp_full.wav"
                 output_file = "temp_audio.wav"
 
                 if not os.path.exists(input_file):
-                    st.error("音声の取得に失敗しました。URLが正しいか、対応しているか確認してください。")
+                    st.error("音声が見つかりませんでした。YouTubeのURLなどで一度試してみてください。")
                 else:
                     # ffmpegでカット
                     cmd = ["ffmpeg", "-i", input_file, "-ss", "0", "-t", str(sec), "-c", "copy", output_file, "-y"]
