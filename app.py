@@ -61,23 +61,30 @@ if uploaded_files:
         json_data = json.dumps(st.session_state.master_data)
         
         # HTML/JavaScript部分
-        html_code = f"""
-            <div style="background:#111; padding:30px; border-radius:15px; text-align:center; color:white; font-family:sans-serif;">
-                <div id="status" style="color:#00f2fe; margin-bottom:15px; font-weight:bold;">Ready</div>
-                <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">{sub_html}</div>
-                <audio id="player" src="data:audio/wav;base64,{st.session_state.audio_b64}"></audio>
-                <div style="display: flex; justify-content: center; gap: 15px;">
-                    <button onclick="playOnly()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🔁 Listen</button>
-                    <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🎙️ Start Shadowing</button>
-                </div>
-            </div>
-            <script>
-                const audio = document.getElementById('player');
-                const masterData = {json_data};
-                const status = document.getElementById('status');
-                let mediaRecorder; let audioChunks = [];
+      # f-stringではなく、通常の文字列として定義し、後で置換する
+html_template = """
+    <div style="background:#111; padding:30px; border-radius:15px; text-align:center; color:white;">
+        <div id="status" style="color:#00f2fe; margin-bottom:15px; font-weight:bold;">Ready</div>
+        <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; min-height:150px;">SUB_HTML_HERE</div>
+        <audio id="player" src="data:audio/wav;base64,AUDIO_B64_HERE"></audio>
+        <div style="display: flex; justify-content: center; gap: 15px;">
+            <button onclick="playOnly()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer;">🔁 Listen</button>
+            <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer;">🎙️ Start Shadowing</button>
+        </div>
+    </div>
+    <script>
+        const audio = document.getElementById('player');
+        const masterData = JSON_DATA_HERE;
+        // ... (以下、JavaScriptのロジック)
+    </script>
+"""
 
-                function playOnly() {{ audio.currentTime = 0; audio.play(); draw(); }}
+# 最後に一気に置換して表示
+final_html = html_template.replace("SUB_HTML_HERE", sub_html)\
+                          .replace("AUDIO_B64_HERE", st.session_state.audio_b64)\
+                          .replace("JSON_DATA_HERE", json_data)
+
+st.components.v1.html(final_html, height=550)
 
                 function draw() {{
                     const ct = audio.currentTime;
