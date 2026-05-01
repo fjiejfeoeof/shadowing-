@@ -37,6 +37,7 @@ if uploaded_files:
         with st.spinner("解析中..."):
             with open("temp_raw", "wb") as f:
                 f.write(target_file.getbuffer())
+            # ffmpegで16kHzモノラルWAVに変換
             subprocess.run(["ffmpeg", "-i", "temp_raw", "-ss", "0", "-t", str(sec), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "temp_audio.wav", "-y"], capture_output=True)
             segments, _ = model.transcribe("temp_audio.wav", word_timestamps=True, language="en")
             st.session_state.master_data = [{"word": w.word.strip(), "start": w.start, "end": w.end} for s in segments for w in s.words]
@@ -44,7 +45,7 @@ if uploaded_files:
                 st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
             st.session_state.current_ana_file = selected_name
 
-    # --- 4. 視覚ガイドUI (水色予兆・リピート・二段階) ---
+    # --- 4. 視覚ガイドUI & 録音制御 ---
     if 'master_data' in st.session_state:
         subtitle_html = "".join([f'<span id="w{i}" class="word-span">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
         
@@ -80,7 +81,7 @@ if uploaded_files:
                         el.style.backgroundColor = "transparent";
                         el.style.transform = (ct >= m.start - 0.1) ? "scale(1.15)" : "scale(1.0)";
                     } else if (ct >= m.start && ct <= m.end) {
-                        el.style.color = "#000"; el.style.backgroundColor = "#f1c40f"; // 本番黄色
+                        el.style.color = "#000"; el.style.backgroundColor = "#f1c40f"; // 発音時黄色
                         el.style.transform = "scale(1.2)";
                     } else {
                         el.style.color = ct > m.end ? "#666" : "#fff";
@@ -115,7 +116,7 @@ if uploaded_files:
                 }, 1000);
             };
 
-            async body startShadowing() {
+            async function startShadowing() {
                 status.textContent = "🔴 RECORDING...";
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 recorder = new MediaRecorder(stream);
@@ -137,14 +138,22 @@ if uploaded_files:
             }
         </script>
         """
-        # 値の埋め込み
         final_html = html_template.replace("__SUBTITLE_HTML__", subtitle_html)\
                                   .replace("__AUDIO_B64__", st.session_state.audio_b64)\
                                   .replace("__JSON_DATA__", json.dumps(st.session_state.master_data))
         st.components.v1.html(final_html, height=550)
 
-        # --- 5. 採点処理用隠し通信 ---
+        # --- 5. 採点処理用隠し通信 (CSSで完全に非表示) ---
+        st.markdown("""
+            <style>
+                div[data-testid="stTextInput"]:has(input[aria-label="HiddenInput"]) {
+                    display: none;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+        
         audio_transport = st.text_input("HiddenInput", key="audio_transport_input", label_visibility="collapsed")
+        
         st.markdown("""
             <script>
             window.addEventListener('message', function(event) {
