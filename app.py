@@ -1,186 +1,77 @@
 import streamlit as st
-import base64
-import torch
-from faster_whisper import WhisperModel
-import yt_dlp
 import os
+from faster_whisper import WhisperModel
 import difflib
-import json
-import subprocess
 
-# --- 1. AIモデルの準備 ---
+# --- 1. 準備：モデルとサンプル設定 ---
 @st.cache_resource
 def load_model():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    return WhisperModel("base", device=device, compute_type="int8")
+    return WhisperModel("base", device="cpu", compute_type="int8") # 安定のCPU
 
 model = load_model()
 
-# --- 2. 画面設定 ---
-st.set_page_config(page_title="Shadowing Studio AI", layout="wide")
-st.title("🎙️ Ultimate Shadowing Studio")
+# サンプルデータ（本来はjson等で管理するが、まずはコード内に直書き）
+SAMPLES = {
+    "Sample 1: Basic Greeting": {
+        "audio": "samples/sample1.mp3",
+        "text": "Hello, how are you doing today? It is a beautiful morning."
+    },
+    "Sample 2: Tech News": {
+        "audio": "samples/sample2.mp3",
+        "text": "Artificial intelligence is changing the way we work and live in the future."
+    },
+    "Sample 3: Daily Life": {
+        "audio": "samples/sample3.mp3",
+        "text": "I would like to order a cup of coffee and a piece of chocolate cake please."
+    }
+}
 
-st.sidebar.header("Settings")
-diff_mode = st.sidebar.selectbox("難易度", ["1: Easy", "2: Normal", "3: Hard"])
-threshold = {"1: Easy": 0.8, "2: Normal": 0.4, "3: Hard": 0.2}[diff_mode]
+# --- 2. 画面構成（HTML一切なし） ---
+st.title("🎙️ Shadowing Alpha: 堅実版")
+st.write("URL弾かれもボタン消失もありません。確実に練習しましょう。")
 
-# --- 3. URL入力 & 音声解析 ---
-url = st.text_input("YouTube / TED / Podcast の URLを入力してください")
-sec = st.number_input("練習する秒数", min_value=5, max_value=60, value=15)
+# 1. お手本を選ぶ
+selected_label = st.selectbox("練習する素材を選んでください", list(SAMPLES.keys()))
+sample = SAMPLES[selected_label]
 
-if url:
-    if 'audio_b64' not in st.session_state or st.session_state.get('last_url') != url:
-        with st.spinner("お手本を準備中... (数分かかる場合があります)"):
-            try:
-                # 一時ファイルの削除
-                for f in ["temp_audio.wav", "temp_full.wav"]:
-                    if os.path.exists(f): os.remove(f)
+# 2. お手本を聴く
+st.subheader("1. Listen")
+if os.path.exists(sample["audio"]):
+    st.audio(sample["audio"])
+else:
+    st.error(f"ファイル {sample['audio']} が見つかりません。フォルダを確認してください。")
 
-                # ダウンロード設定（Apple Podcasts / BBC 最強化版）
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'nocheckcertificate': True,
-                    'quiet': False, # ログを出して状況を把握しやすくする
-                    'no_warnings': False,
-                    'extract_flat': False, 
-                    'force_generic_extractor': True, # これが重要
-                    'outtmpl': 'temp_full',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'wav',
-                        'preferredquality': '192',
-                    }],
-                }
+# 3. 字幕を確認
+with st.expander("お手本のスクリプトを表示"):
+    st.write(sample["text"])
 
-                # ダウンロード実行
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
+# 4. 録音ファイルをアップロード
+st.subheader("2. Shadowing & Upload")
+st.info("スマホやPCの録音アプリで録った声を、下のボタンからアップロードしてください。")
+user_voice = st.file_uploader("録音ファイルをドロップ", type=["wav", "mp3", "m4a"])
 
-                input_file = "temp_full.wav"
-                output_file = "temp_audio.wav"
-
-                if not os.path.exists(input_file):
-                    st.error("音声が見つかりませんでした。YouTubeのURLなどで一度試してみてください。")
-                else:
-                    # ffmpegでカット
-                    cmd = ["ffmpeg", "-i", input_file, "-ss", "0", "-t", str(sec), "-c", "copy", output_file, "-y"]
-                    subprocess.run(cmd, check=True, capture_output=True)
-
-                    if os.path.exists(output_file):
-                        # 文字起こし
-                        segments, _ = model.transcribe(output_file, word_timestamps=True, language="en")
-                        
-                        # データ保存
-                        st.session_state.master_data = [{"word": w.word.strip(), "start": w.start, "end": w.end} for s in segments for w in s.words]
-                        with open(output_file, "rb") as f:
-                            st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
-                        st.session_state.last_url = url
-                    else:
-                        st.error("音声の切り出しに失敗しました。")
-
-            except Exception as e:
-                st.error(f"詳細なエラーが発生しました: {e}")
-
-    # --- 4. ビジュアルガイド ---
-    if 'master_data' in st.session_state:
-        sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
-        json_data = json.dumps(st.session_state.master_data)
+# 5. 採点実行
+if user_voice:
+    with st.spinner("AI採点中..."):
+        # 一時保存
+        with open("user_temp.wav", "wb") as f:
+            f.write(user_voice.getbuffer())
         
-        html_code = """
-            <div style="background:#111; padding:30px; border-radius:15px; text-align:center; color:white; font-family:sans-serif;">
-                <div id="status" style="color:#00f2fe; margin-bottom:15px; font-weight:bold;">Ready</div>
-                <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">SUBTITLE_HERE</div>
-                <audio id="player" src="data:audio/wav;base64,AUDIO_B64_HERE"></audio>
-                <div style="display: flex; justify-content: center; gap: 15px;">
-                    <button onclick="playOnly()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🔁 Listen (No Rec)</button>
-                    <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🎙️ Start Shadowing</button>
-                </div>
-            </div>
-            <script>
-                const audio = document.getElementById('player');
-                const masterData = JSON_DATA_HERE;
-                const status = document.getElementById('status');
-                let mediaRecorder; let audioChunks = [];
-                function playOnly() { audio.currentTime = 0; audio.play(); draw(); }
-                function draw() {
-                    const ct = audio.currentTime;
-                    masterData.forEach((m, i) => {
-                        const el = document.getElementById('w' + i);
-                        if (!el) return;
-                        if (ct >= m.start - 0.75 && ct < m.start) el.style.color = "#00f2fe";
-                        else if (ct >= m.start && ct <= m.end) {
-                            el.style.color = "#000"; el.style.backgroundColor = "#f1c40f"; el.style.transform = "scale(1.15)";
-                        } else {
-                            el.style.color = ct > m.end ? "#555" : "#fff"; el.style.backgroundColor = "transparent"; el.style.transform = "scale(1.0)";
-                        }
-                    });
-                    if (!audio.paused) requestAnimationFrame(draw);
-                }
-                async function toggleRec() {
-                    const btn = document.getElementById('recBtn');
-                    if (!mediaRecorder || mediaRecorder.state === "inactive") {
-                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        mediaRecorder = new MediaRecorder(stream);
-                        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-                        mediaRecorder.onstop = () => {
-                            const blob = new Blob(audioChunks, { type: 'audio/wav' });
-                            const reader = new FileReader();
-                            reader.readAsDataURL(blob);
-                            reader.onloadend = () => { window.parent.postMessage({type: 'UPLOAD_AUDIO', data: reader.result}, '*'); };
-                            audioChunks = [];
-                        };
-                        mediaRecorder.start(); audio.currentTime = 0; audio.play(); draw();
-                        btn.innerText = "🛑 Stop & Score"; btn.style.background = "#95a5a6";
-                        status.innerText = "🔴 Recording & Playing...";
-                    } else {
-                        mediaRecorder.stop(); audio.pause();
-                        btn.innerText = "🎙️ Start Shadowing"; btn.style.background = "#e74c3c";
-                    }
-                }
-            </script>
-        """.replace("SUBTITLE_HERE", sub_html).replace("AUDIO_B64_HERE", st.session_state.audio_b64).replace("JSON_DATA_HERE", json_data)
-        st.components.v1.html(html_code, height=500)
-
-        # --- 5. 採点システム ---
-        audio_transport = st.text_input("TARGET_INPUT_FOR_AUDIO", key="audio_transport_input")
-        st.markdown("""
-            <style>div[data-testid="stTextInput"]:has(input[aria-label="TARGET_INPUT_FOR_AUDIO"]) { display: none; }</style>
-            <script>
-            window.addEventListener('message', function(event) {
-                if (event.data.type === 'UPLOAD_AUDIO') {
-                    const base64Data = event.data.data.split(',')[1];
-                    const allInputs = window.parent.document.querySelectorAll('input');
-                    for (let input of allInputs) {
-                        if (input.getAttribute('aria-label') === 'TARGET_INPUT_FOR_AUDIO') {
-                            input.value = base64Data;
-                            input.dispatchEvent(new Event('input', { bubbles: true }));
-                        }
-                    }
-                }
-            });
-            </script>
-        """, unsafe_allow_html=True)
-
-        if audio_transport and len(audio_transport) > 100:
-            with st.spinner("AI採点中..."):
-                try:
-                    with open("user_rec.wav", "wb") as f:
-                        f.write(base64.b64decode(audio_transport))
-                    user_res, _ = model.transcribe("user_rec.wav", language="en", beam_size=1)
-                    user_text = " ".join([s.text for s in user_res]).lower().strip()
-                    if user_text:
-                        m_words = [m['word'].lower().strip('.,!?') for m in st.session_state.master_data]
-                        u_words = user_text.split()
-                        st.subheader("Shadowing Result")
-                        result_html = '<div style="display: flex; flex-wrap: wrap; gap: 10px; background: #1a1a1a; padding: 20px; border-radius: 10px;">'
-                        score = 0
-                        for m_w in m_words:
-                            is_match = any(difflib.SequenceMatcher(None, m_w, u_w.strip('.,!?')).ratio() > threshold for u_w in u_words)
-                            color = "#2ecc71" if is_match else "#e74c3c"
-                            if is_match: score += 1
-                            result_html += f'<span style="color:{color}; font-size: 20px; font-weight: bold;">{m_w}</span>'
-                        result_html += '</div>'
-                        st.markdown(result_html, unsafe_allow_html=True)
-                        st.metric("達成度", f"{int((score / len(m_words)) * 100)}%")
-                except Exception as e:
-                    st.error(f"採点エラー: {e}")
+        # Whisperで文字起こし
+        segments, _ = model.transcribe("user_temp.wav")
+        user_text = "".join([s.text for s in segments]).strip()
+        
+        # 比較
+        score = difflib.SequenceMatcher(None, sample["text"].lower(), user_text.lower()).ratio()
+        
+        # 結果表示
+        st.subheader("3. Result")
+        st.metric(label="シャドーイング一致率", value=f"{int(score * 100)}%")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("お手本")
+            st.write(sample["text"])
+        with col2:
+            st.caption("あなたの声（AI認識結果）")
+            st.write(user_text)
