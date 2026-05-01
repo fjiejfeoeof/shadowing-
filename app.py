@@ -49,83 +49,130 @@ if uploaded_files:
                 st.error(f"解析エラー: {e}")
 
     # --- 4. プレイヤー表示 & ハイライト & 録音制御 ---
+    # --- 4. プレイヤー表示 & ハイライト & 録音制御 ---
     if 'master_data' in st.session_state and 'audio_b64' in st.session_state:
-        sub_html = "".join([f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' for i, m in enumerate(st.session_state.master_data)])
+        # 単語ごとのHTML要素を生成
+        sub_html = "".join([
+            f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' 
+            for i, m in enumerate(st.session_state.master_data)
+        ])
+        
         json_data = json.dumps(st.session_state.master_data)
         
-        # テンプレート方式でJSの波括弧問題を回避
+        # HTML/JS テンプレート (Pythonのf-stringを使わず、中括弧エラーを回避)
         html_template = """
         <div style="background:#111; padding:30px; border-radius:15px; text-align:center; color:white; font-family:sans-serif;">
             <div id="status" style="color:#00f2fe; margin-bottom:15px; font-weight:bold;">Ready</div>
-            <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">__SUB_HTML__</div>
+            <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">
+                __SUB_HTML__
+            </div>
             <audio id="player" src="data:audio/wav;base64,__AUDIO_B64__"></audio>
             <div style="display: flex; justify-content: center; gap: 15px;">
                 <button onclick="playOnly()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🔁 Listen</button>
                 <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🎙️ Start Shadowing</button>
             </div>
         </div>
+
         <script>
             const audio = document.getElementById('player');
             const masterData = __JSON_DATA__;
             const status = document.getElementById('status');
-            let mediaRecorder; let audioChunks = [];
+            const btn = document.getElementById('recBtn');
+            let mediaRecorder; 
+            let audioChunks = [];
 
-            // --- ハイライト機能の実装 ---
+            // ハイライト描画関数
             function draw() {
                 const ct = audio.currentTime;
                 masterData.forEach((m, i) => {
                     const el = document.getElementById('w' + i);
                     if (!el) return;
                     if (ct >= m.start - 0.1 && ct <= m.end) {
-                        el.style.color = "#000"; el.style.backgroundColor = "#f1c40f"; el.style.transform = "scale(1.1)";
+                        el.style.color = "#000"; 
+                        el.style.backgroundColor = "#f1c40f"; 
+                        el.style.transform = "scale(1.1)";
                     } else {
-                        el.style.color = ct > m.end ? "#555" : "#fff"; el.style.backgroundColor = "transparent"; el.style.transform = "scale(1.0)";
+                        el.style.color = ct > m.end ? "#555" : "#fff"; 
+                        el.style.backgroundColor = "transparent"; 
+                        el.style.transform = "scale(1.0)";
                     }
                 });
                 if (!audio.paused) requestAnimationFrame(draw);
             }
 
-            function playOnly() { audio.currentTime = 0; audio.play(); draw(); }
+            function playOnly() { 
+                audio.currentTime = 0; 
+                audio.play(); 
+                draw(); 
+            }
 
-            // --- 録音機能の実装 ---
             async function toggleRec() {
-                const btn = document.getElementById('recBtn');
                 if (!mediaRecorder || mediaRecorder.state === "inactive") {
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                     mediaRecorder = new MediaRecorder(stream);
-                    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-                    mediaRecorder.onstop = () => {
+                    audioChunks = [];
+                    
+                    mediaRecorder.ondataavailable = e => {
+                        if (e.data.size > 0) audioChunks.push(e.data);
+                    };
+
+                    mediaRecorder.onstop = async () => {
                         const blob = new Blob(audioChunks, { type: 'audio/wav' });
                         const reader = new FileReader();
                         reader.readAsDataURL(blob);
-                        reader.onloadend = () => { window.parent.postMessage({type: 'UPLOAD_AUDIO', data: reader.result}, '*'); };
-                        audioChunks = [];
+                        reader.onloadend = () => {
+                            // 親ウィンドウ（Streamlit）へ録音データを送信
+                            window.parent.postMessage({
+                                type: 'UPLOAD_AUDIO',
+                                data: reader.result
+                            }, '*');
+                        };
                     };
-                    mediaRecorder.start(); audio.currentTime = 0; audio.play(); draw();
-                    btn.innerText = "🛑 Stop & Score"; btn.style.background = "#95a5a6";
+
+                    mediaRecorder.start();
+                    audio.currentTime = 0;
+                    audio.play();
+                    draw();
+                    btn.innerText = "🛑 Stop & Score";
+                    btn.style.background = "#95a5a6";
                     status.innerText = "🔴 Recording...";
                 } else {
-                    mediaRecorder.stop(); audio.pause();
-                    btn.innerText = "🎙️ Start Shadowing"; btn.style.background = "#e74c3c";
+                    mediaRecorder.stop();
+                    audio.pause();
+                    btn.innerText = "🎙️ Start Shadowing";
+                    btn.style.background = "#e74c3c";
                     status.innerText = "Analyzing Result...";
                 }
             }
         </script>
         """
-        final_html = html_template.replace("__SUB_HTML__", sub_html).replace("__AUDIO_B64__", st.session_state.audio_b64).replace("__JSON_DATA__", json_data)
+        
+        # プレースホルダーを実際のデータに置換
+        final_html = (html_template
+                      .replace("__SUB_HTML__", sub_html)
+                      .replace("__AUDIO_B64__", st.session_state.audio_b64)
+                      .replace("__JSON_DATA__", json_data))
+        
         st.components.v1.html(final_html, height=550)
 
         # --- 5. 採点ロジック（Pythonバックエンド） ---
-        audio_transport = st.text_input("隠し入力", key="audio_transport_input", label_visibility="collapsed")
+        # 録音データを受け取るための隠し入力
+        # JSからの入力を受け取るため、keyを設定して管理
+        audio_transport = st.text_input("録音データ転送", key="audio_transport_input", label_visibility="collapsed")
+
+        # 親ウィンドウでMessageを受け取り、st.text_inputに値をセットするJS
         st.markdown("""
             <script>
             window.addEventListener('message', function(event) {
                 if (event.data.type === 'UPLOAD_AUDIO') {
                     const base64Data = event.data.data.split(',')[1];
-                    const input = window.parent.document.querySelector('input[aria-label="隠し入力"]');
-                    if (input) {
-                        input.value = base64Data;
-                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                    // aria-labelを使って確実にターゲットのInputを見つける
+                    const inputs = window.parent.document.querySelectorAll('input');
+                    let targetInput = Array.from(inputs).find(el => el.ariaLabel === "録音データ転送");
+                    
+                    if (targetInput) {
+                        targetInput.value = base64Data;
+                        targetInput.dispatchEvent(new Event('input', { bubbles: true }));
                     }
                 }
             });
@@ -137,6 +184,7 @@ if uploaded_files:
                 try:
                     with open("user_rec.wav", "wb") as f:
                         f.write(base64.b64decode(audio_transport))
+                    
                     user_res, _ = model.transcribe("user_rec.wav", language="en")
                     user_text = " ".join([s.text for s in user_res]).lower().strip()
                     
@@ -148,15 +196,18 @@ if uploaded_files:
                         result_html = '<div style="display: flex; flex-wrap: wrap; gap: 10px; background: #1a1a1a; padding: 20px; border-radius: 10px;">'
                         score = 0
                         for m_w in m_words:
+                            # 類似度判定
                             is_match = any(difflib.SequenceMatcher(None, m_w, u_w.strip('.,!?')).ratio() > threshold for u_w in u_words)
                             color = "#2ecc71" if is_match else "#e74c3c"
                             if is_match: score += 1
                             result_html += f'<span style="color:{color}; font-size: 20px; font-weight: bold;">{m_w}</span>'
                         result_html += '</div>'
+                        
                         st.markdown(result_html, unsafe_allow_html=True)
                         st.metric("達成度", f"{int((score / len(m_words)) * 100)}%")
                     
-                    # 採点後にデータをリセットして連続練習を可能にする
+                    # 処理が終わったら入力をクリア（次の録音のために重要）
                     st.session_state.audio_transport_input = ""
+                    
                 except Exception as e:
                     st.error(f"採点エラー: {e}")
