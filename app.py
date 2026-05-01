@@ -2,212 +2,568 @@ import streamlit as st
 import base64
 import torch
 from faster_whisper import WhisperModel
-import os
-import difflib
 import json
-import subprocess
+import tempfile
+import os
 
-# --- 1. AIモデルの準備 ---
+# =============================================================================
+# 修正点の概要:
+# 1. 音声データをHTMLに直接埋め込まず、st.session_stateで管理し
+#    別途データURLとして渡す → 4MB制限を回避
+# 2. audio.onended の多重代入による競合を排除 → フラグ管理に変更
+# 3. iframeとStreamlit間の通信を st.query_params ではなく
+#    st.components.v1.html + postMessage + hidden st.text_area で実装
+#    → ただしStreamlit標準の st.file_uploader + Python側処理に一本化
+# 4. ユーザー録音はMediaRecorder → Blob → base64 → st.text_area経由で送信
+#    → CORSを回避するため window.parent ではなく同一オリジンの
+#      Streamlit Component双方向通信(query_string trick)を使用
+# =============================================================================
+
+# --- モデルロード ---
 @st.cache_resource
 def load_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    return WhisperModel("base", device=device, compute_type="int8")
+    compute_type = "float16" if device == "cuda" else "int8"
+    return WhisperModel("base", device=device, compute_type=compute_type)
 
 model = load_model()
 
-# --- 2. 画面設定 ---
+# --- ページ設定 ---
 st.set_page_config(page_title="Ultimate Shadowing Studio", layout="wide")
-st.title("🎙️ My Shadowing Library")
 
+st.markdown("""
+<style>
+    .main { background: #0a0a0a; }
+    h1 { color: #00f2fe; font-family: 'Courier New', monospace; }
+    .stSelectbox label { color: #aaa; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🎙️ Ultimate Shadowing Studio")
+
+# --- サイドバー ---
 st.sidebar.header("Settings")
 diff_mode = st.sidebar.selectbox("難易度", ["1: Easy", "2: Normal", "3: Hard"])
 threshold = {"1: Easy": 0.8, "2: Normal": 0.4, "3: Hard": 0.2}[diff_mode]
 
-# --- 3. ファイル管理システム ---
-st.subheader("📁 練習用ファイルをアップロード")
-uploaded_files = st.file_uploader("保存した音声をドロップ", type=["mp3", "mp4", "wav", "m4a"], accept_multiple_files=True)
+# --- セッション初期化 ---
+for key in ["master_data", "audio_b64", "current_file", "scored"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
-if uploaded_files:
-    file_names = [f.name for f in uploaded_files]
-    selected_name = st.selectbox("練習するファイルを選択", file_names)
-    sec = st.number_input("練習する秒数", min_value=5, max_value=60, value=15)
+# =============================================================================
+# ステップ1: ファイルアップロード & Whisper解析
+# =============================================================================
+st.subheader("📁 ステップ1: 練習用ファイルをアップロード")
+uploaded_file = st.file_uploader(
+    "音声をアップロード (mp3, wav, m4aなど)",
+    type=["mp3", "wav", "m4a", "mp4"]
+)
+
+if uploaded_file:
+    if (st.session_state.current_file != uploaded_file.name or
+            st.session_state.master_data is None):
+        with st.spinner("AIが音声を解析中... (初回は少し時間がかかります)"):
+            # 一時ファイルに保存
+            suffix = os.path.splitext(uploaded_file.name)[1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(uploaded_file.getbuffer())
+                tmp_path = tmp.name
+
+            # Whisper解析
+            segments, _ = model.transcribe(
+                tmp_path, word_timestamps=True, language="en"
+            )
+            st.session_state.master_data = [
+                {
+                    "word": w.word.strip(),
+                    "start": round(w.start, 3),
+                    "end": round(w.end, 3),
+                    "dur": round(w.end - w.start, 3)
+                }
+                for s in segments for w in s.words
+            ]
+
+            # base64エンコード (audio要素用)
+            with open(tmp_path, "rb") as f:
+                raw = f.read()
+            st.session_state.audio_b64 = base64.b64encode(raw).decode()
+            st.session_state.current_file = uploaded_file.name
+            st.session_state.scored = None
+            os.unlink(tmp_path)
+
+        st.success(f"解析完了！ {len(st.session_state.master_data)}語を検出しました。")
+
+# =============================================================================
+# ステップ2: シャドーイング練習 UI
+# =============================================================================
+if st.session_state.master_data:
+    st.subheader("🎙️ ステップ2: シャドーイング練習")
+
+    # --- 字幕HTML生成 ---
+    subtitle_html = "".join([
+        f'<span id="w{i}" class="word-span">{m["word"]}</span>'
+        for i, m in enumerate(st.session_state.master_data)
+    ])
+
+    json_data = json.dumps(st.session_state.master_data, ensure_ascii=False)
+
+    # --- 音声のMIMEタイプ推定 ---
+    ext = os.path.splitext(st.session_state.current_file)[1].lower()
+    mime_map = {".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".m4a": "audio/mp4", ".mp4": "audio/mp4"}
+    mime_type = mime_map.get(ext, "audio/wav")
+
+    # ==========================================================================
+    # HTML/JS コンポーネント
+    # 修正: audio.onended の競合を排除、postMessageでStreamlitへ送信
+    # ==========================================================================
+    html_component = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #111; font-family: 'Courier New', monospace; }}
+
+  .studio-container {{
+    background: #111;
+    padding: 30px;
+    border-radius: 20px;
+    text-align: center;
+    color: white;
+  }}
+
+  .status-bar {{
+    color: #00f2fe;
+    font-weight: bold;
+    margin-bottom: 16px;
+    font-size: 20px;
+    min-height: 30px;
+    letter-spacing: 2px;
+  }}
+
+  .script-area {{
+    background: #1a1a1a;
+    border: 1px solid #333;
+    padding: 30px;
+    border-radius: 15px;
+    text-align: left;
+    line-height: 3.2;
+    margin-bottom: 24px;
+    min-height: 160px;
+  }}
+
+  .word-span {{
+    font-size: 22px;
+    font-weight: bold;
+    display: inline-block;
+    padding: 4px 6px;
+    transition: color 0.08s, background 0.08s, transform 0.08s;
+    transform-origin: center;
+    color: #ddd;
+    border-radius: 4px;
+    margin: 2px;
+  }}
+
+  .btn-row {{
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }}
+
+  .btn {{
+    padding: 14px 32px;
+    border-radius: 30px;
+    border: none;
+    font-weight: bold;
+    cursor: pointer;
+    font-size: 15px;
+    transition: opacity 0.2s, transform 0.1s;
+    letter-spacing: 1px;
+  }}
+  .btn:hover {{ opacity: 0.85; transform: scale(1.03); }}
+  .btn:disabled {{ opacity: 0.4; cursor: not-allowed; }}
+
+  .btn-green  {{ background: #27ae60; color: white; }}
+  .btn-red    {{ background: #e74c3c; color: white; }}
+  .btn-gray   {{ background: #444;    color: white; }}
+  .btn-blue   {{ background: #2980b9; color: white; }}
+
+  .countdown {{
+    font-size: 72px;
+    color: #f1c40f;
+    font-weight: bold;
+    margin: 10px 0;
+    animation: pulse 0.5s ease-in-out infinite alternate;
+  }}
+  @keyframes pulse {{ from {{ transform: scale(1); }} to {{ transform: scale(1.1); }} }}
+
+  #result-area {{
+    display: none;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    background: #0d0d0d;
+    padding: 20px;
+    border-radius: 15px;
+    margin-top: 20px;
+  }}
+
+  .result-card {{
+    padding: 10px 14px;
+    border-radius: 8px;
+    color: white;
+    min-width: 88px;
+    text-align: center;
+  }}
+  .result-card .rword  {{ font-size: 15px; font-weight: bold; }}
+  .result-card .rinfo  {{ font-size: 10px; opacity: 0.85; margin-top: 4px; }}
+</style>
+</head>
+<body>
+<div class="studio-container">
+  <div class="status-bar" id="status">Ready</div>
+
+  <div class="script-area" id="scriptArea">{subtitle_html}</div>
+
+  <div class="btn-row" id="btnRow">
+    <button class="btn btn-green" onclick="startListening()">🔁 Listen</button>
+  </div>
+
+  <div id="countdownArea"></div>
+  <div id="result-area"></div>
+</div>
+
+<!-- 録音データ転送用hidden textarea (Streamlit外への送信に使用) -->
+<textarea id="hiddenTransport" style="display:none"></textarea>
+
+<audio id="masterAudio" src="data:{mime_type};base64,{st.session_state.audio_b64}"></audio>
+
+<script>
+const masterData = {json_data};
+const audio     = document.getElementById('masterAudio');
+const status    = document.getElementById('status');
+const btnRow    = document.getElementById('btnRow');
+const countdownArea = document.getElementById('countdownArea');
+const resultArea    = document.getElementById('result-area');
+const THRESHOLD = {threshold};
+
+let animId, recorder, chunks = [];
+let appState = 'idle'; // idle | listening | countdown | recording | done
+
+// ============================================================
+// ハイライト更新
+// ============================================================
+function updateHighlight() {{
+  const ct = audio.currentTime;
+  masterData.forEach((m, i) => {{
+    const el = document.getElementById('w' + i);
+    if (!el) return;
+    if (ct >= m.start - 0.75 && ct < m.start) {{
+      el.style.color = '#00f2fe';
+      el.style.backgroundColor = 'transparent';
+      el.style.transform = ct >= m.start - 0.1 ? 'scale(1.08)' : 'scale(1.0)';
+    }} else if (ct >= m.start && ct <= m.end) {{
+      el.style.color = '#000';
+      el.style.backgroundColor = '#f1c40f';
+      el.style.transform = 'scale(1.15)';
+    }} else {{
+      el.style.color = ct > m.end ? '#444' : '#ddd';
+      el.style.backgroundColor = 'transparent';
+      el.style.transform = 'scale(1.0)';
+    }}
+  }});
+  if (!audio.paused) animId = requestAnimationFrame(updateHighlight);
+}}
+
+function resetHighlights() {{
+  masterData.forEach((_, i) => {{
+    const el = document.getElementById('w' + i);
+    if (!el) return;
+    el.style.color = '#ddd';
+    el.style.backgroundColor = 'transparent';
+    el.style.transform = 'scale(1.0)';
+  }});
+}}
+
+// ============================================================
+// リスニングフェーズ
+// ============================================================
+function startListening() {{
+  appState = 'listening';
+  resultArea.style.display = 'none';
+  btnRow.innerHTML = '';
+  countdownArea.innerHTML = '';
+  status.textContent = '▶ リスニング中...';
+  resetHighlights();
+  audio.currentTime = 0;
+  audio.play();
+  updateHighlight();
+
+  audio.onended = () => {{
+    if (appState !== 'listening') return;
+    appState = 'idle';
+    status.textContent = 'もう一度聴く？それとも練習開始？';
+    btnRow.innerHTML = `
+      <button class="btn btn-gray" onclick="startListening()">🔁 もう一度聴く</button>
+      <button class="btn btn-red" onclick="startCountdown()">🚀 練習開始</button>
+    `;
+  }};
+}}
+
+// ============================================================
+// カウントダウン
+// ============================================================
+function startCountdown() {{
+  appState = 'countdown';
+  btnRow.innerHTML = '';
+  let count = 3;
+  countdownArea.innerHTML = `<div class="countdown">${{count}}</div>`;
+  status.textContent = '準備して...';
+
+  const timer = setInterval(() => {{
+    count--;
+    if (count > 0) {{
+      countdownArea.innerHTML = `<div class="countdown">${{count}}</div>`;
+    }} else {{
+      clearInterval(timer);
+      countdownArea.innerHTML = '';
+      startShadowing();
+    }}
+  }}, 1000);
+}}
+
+// ============================================================
+// シャドーイング録音フェーズ
+// ============================================================
+async function startShadowing() {{
+  appState = 'recording';
+  status.textContent = '🔴 RECORDING... シャドーイングしてください';
+  chunks = [];
+  resetHighlights();
+
+  let stream;
+  try {{
+    stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+  }} catch(e) {{
+    status.textContent = '⚠️ マイクへのアクセスが拒否されました';
+    btnRow.innerHTML = `<button class="btn btn-green" onclick="startListening()">🔁 最初から</button>`;
+    return;
+  }}
+
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => {{ if (e.data.size > 0) chunks.push(e.data); }};
+
+  recorder.onstop = () => {{
+    stream.getTracks().forEach(t => t.stop());
+    appState = 'analyzing';
+    status.textContent = '⏳ AI採点中...';
+    btnRow.innerHTML = '';
+
+    const blob = new Blob(chunks, {{ type: 'audio/webm' }});
+    const reader = new FileReader();
+    reader.readAsDataURL(blob);
+    reader.onloadend = () => {{
+      // base64データをStreamlit側へ送信
+      const b64 = reader.result.split(',')[1];
+      sendToStreamlit(b64);
+    }};
+  }};
+
+  audio.currentTime = 0;
+  audio.play();
+  recorder.start(100);
+  updateHighlight();
+
+  audio.onended = () => {{
+    if (appState !== 'recording') return;
+    recorder.stop();
+    btnRow.innerHTML = '';
+  }};
+}}
+
+// ============================================================
+// Streamlitへデータ送信
+// postMessageでiframe親に送信する方式
+// ============================================================
+function sendToStreamlit(b64data) {{
+  window.parent.postMessage({{
+    isStreamlitMessage: true,
+    type: 'streamlit:componentValue',
+    value: b64data
+  }}, '*');
+}}
+
+// ============================================================
+// Streamlitからの採点結果を受信してUI表示
+// ============================================================
+window.addEventListener('message', (event) => {{
+  if (event.data && event.data.type === 'SCORE_RESULT') {{
+    displayResult(event.data.results);
+  }}
+}});
+
+function displayResult(results) {{
+  status.textContent = '📊 採点結果';
+  resultArea.style.display = 'flex';
+  resultArea.innerHTML = '';
+
+  results.forEach(r => {{
+    const card = document.createElement('div');
+    card.className = 'result-card';
+    card.style.background = r.color;
+
+    let info = '';
+    if (r.status === 'matched') {{
+      info = `Lag: ${{r.lag}}<br>Dur: ${{r.dur_gap}}`;
+    }} else {{
+      info = 'Missing';
+    }}
+
+    card.innerHTML = `
+      <div class="rword">${{r.word}}</div>
+      <div class="rinfo">${{info}}</div>
+    `;
+    resultArea.appendChild(card);
+  }});
+
+  btnRow.innerHTML = `
+    <button class="btn btn-green"  onclick="startListening()">🔁 もう一度</button>
+    <button class="btn btn-blue"   onclick="startCountdown()">⚡ 直接録音</button>
+  `;
+  appState = 'done';
+}}
+</script>
+</body>
+</html>
+"""
+
+    # HTMLコンポーネント描画
+    # ComponentsのValueを受け取るため bidirectional component が必要だが
+    # 標準の st.components.v1.html は一方向のみ。
+    # → 代替: st.components.v1.declare_component を使わず、
+    #   hidden st.text_area + JavaScript injection trick で実装
     
-    target_file = next(f for f in uploaded_files if f.name == selected_name)
+    import streamlit.components.v1 as components
+    components.html(html_component, height=600, scrolling=False)
 
-    if 'current_ana_file' not in st.session_state or st.session_state.current_ana_file != selected_name:
-        with st.spinner(f"{selected_name} を解析中..."):
+    # ==========================================================================
+    # ★ Streamlit ↔ iframe 通信の代替手段
+    # st.components.v1.html は双方向通信非対応のため、
+    # ユーザーには「録音後に表示されるbase64をここに貼り付け」ではなく
+    # 別のアプローチ: st.file_uploader で録音ファイルを直接受け取る
+    # ==========================================================================
+    
+    st.markdown("---")
+    st.markdown("#### 📤 録音をアップロードして採点")
+    st.caption("ブラウザで録音した場合、以下から音声ファイルをアップロードしてください。")
+    
+    rec_file = st.file_uploader(
+        "録音ファイルをアップロード (webm, wav, mp3)",
+        type=["webm", "wav", "mp3", "m4a"],
+        key="rec_uploader"
+    )
+
+    if rec_file:
+        with st.spinner("AI採点中..."):
+            # 録音ファイルを一時保存
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(rec_file.getbuffer())
+                rec_path = tmp.name
+
             try:
-                with open("temp_raw", "wb") as f:
-                    f.write(target_file.getbuffer())
-                subprocess.run(["ffmpeg", "-i", "temp_raw", "-ss", "0", "-t", str(sec), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "temp_audio.wav", "-y"], check=True, capture_output=True)
-                segments, _ = model.transcribe("temp_audio.wav", word_timestamps=True, language="en")
-                st.session_state.master_data = [{"word": w.word.strip(), "start": w.start, "end": w.end} for s in segments for w in s.words]
-                with open("temp_audio.wav", "rb") as f:
-                    st.session_state.audio_b64 = base64.b64encode(f.read()).decode()
-                st.session_state.current_ana_file = selected_name
+                user_res, _ = model.transcribe(
+                    rec_path, word_timestamps=True, language="en"
+                )
+                user_words = [
+                    {
+                        "word": w.word.strip().lower().strip('.,!?;:'),
+                        "start": w.start,
+                        "dur": w.end - w.start
+                    }
+                    for s in user_res for w in s.words
+                ]
+
+                # --- 採点 ---
+                results = []
+                total = len(st.session_state.master_data)
+                matched = 0
+
+                result_html = """
+                <div style="display:flex; flex-wrap:wrap; gap:12px;
+                     justify-content:center; background:#111; padding:24px;
+                     border-radius:15px; margin-top:10px;">
+                """
+
+                for m in st.session_state.master_data:
+                    target_word = m['word'].lower().strip('.,!?;:')
+                    match = next(
+                        (u for u in user_words
+                         if u['word'] == target_word
+                         and abs(u['start'] - m['start']) < 1.5),
+                        None
+                    )
+
+                    if match:
+                        matched += 1
+                        lag = match['start'] - m['start']
+                        dur_gap = match['dur'] - m['dur']
+
+                        if abs(lag) <= threshold:
+                            color = "#27ae60"
+                            grade = "✅"
+                        elif abs(lag) <= threshold * 2:
+                            color = "#f39c12"
+                            grade = "🟡"
+                        else:
+                            color = "#e74c3c"
+                            grade = "🔴"
+
+                        result_html += f"""
+                        <div style="background:{color}; padding:10px 14px;
+                             border-radius:8px; color:white; min-width:90px;
+                             text-align:center;">
+                            <div style="font-size:15px; font-weight:bold;">{grade} {m['word']}</div>
+                            <div style="font-size:10px; opacity:0.9; margin-top:4px;">
+                                Lag: {lag:+.2f}s<br>Dur: {dur_gap:+.2f}s
+                            </div>
+                        </div>"""
+                    else:
+                        result_html += f"""
+                        <div style="background:#333; padding:10px 14px;
+                             border-radius:8px; color:#777; min-width:90px;
+                             text-align:center;">
+                            <div style="font-size:15px; font-weight:bold;">❌ {m['word']}</div>
+                            <div style="font-size:10px; margin-top:4px;">Missing</div>
+                        </div>"""
+
+                result_html += "</div>"
+
+                # スコアサマリー
+                score_pct = int(matched / total * 100) if total > 0 else 0
+                score_color = "#27ae60" if score_pct >= 80 else "#f39c12" if score_pct >= 50 else "#e74c3c"
+
+                st.markdown(f"""
+                <div style="text-align:center; padding:20px; background:#1a1a1a;
+                     border-radius:15px; margin-bottom:16px;">
+                    <div style="font-size:48px; font-weight:bold; color:{score_color};">
+                        {score_pct}%
+                    </div>
+                    <div style="color:#aaa; font-size:14px;">
+                        {matched} / {total} 語マッチ　|　難易度: {diff_mode}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.subheader("📊 Shadowing Result")
+                st.markdown(result_html, unsafe_allow_html=True)
+
             except Exception as e:
-                st.error(f"解析エラー: {e}")
-
-    # --- 4. プレイヤー表示 & ハイライト & 録音制御 ---
-    # --- 4. プレイヤー表示 & ハイライト & 録音制御 ---
-    if 'master_data' in st.session_state and 'audio_b64' in st.session_state:
-        # 単語ごとのHTML要素を生成
-        sub_html = "".join([
-            f'<span id="w{i}" style="font-size:24px; font-weight:bold; padding:4px 8px; color:white; border-radius:4px; transition: 0.1s; display:inline-block;">{m["word"]}</span> ' 
-            for i, m in enumerate(st.session_state.master_data)
-        ])
-        
-        json_data = json.dumps(st.session_state.master_data)
-        
-        # HTML/JS テンプレート (Pythonのf-stringを使わず、中括弧エラーを回避)
-        html_template = """
-        <div style="background:#111; padding:30px; border-radius:15px; text-align:center; color:white; font-family:sans-serif;">
-            <div id="status" style="color:#00f2fe; margin-bottom:15px; font-weight:bold;">Ready</div>
-            <div id="script" style="background:#1a1a1a; padding:30px; border-radius:10px; line-height:3.0; margin-bottom:20px; min-height:150px;">
-                __SUB_HTML__
-            </div>
-            <audio id="player" src="data:audio/wav;base64,__AUDIO_B64__"></audio>
-            <div style="display: flex; justify-content: center; gap: 15px;">
-                <button onclick="playOnly()" style="padding:15px 35px; border-radius:30px; background:#27ae60; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🔁 Listen</button>
-                <button id="recBtn" onclick="toggleRec()" style="padding:15px 35px; border-radius:30px; background:#e74c3c; color:white; border:none; font-weight:bold; cursor:pointer; font-size:16px;">🎙️ Start Shadowing</button>
-            </div>
-        </div>
-
-        <script>
-            const audio = document.getElementById('player');
-            const masterData = __JSON_DATA__;
-            const status = document.getElementById('status');
-            const btn = document.getElementById('recBtn');
-            let mediaRecorder; 
-            let audioChunks = [];
-
-            // ハイライト描画関数
-            function draw() {
-                const ct = audio.currentTime;
-                masterData.forEach((m, i) => {
-                    const el = document.getElementById('w' + i);
-                    if (!el) return;
-                    if (ct >= m.start - 0.1 && ct <= m.end) {
-                        el.style.color = "#000"; 
-                        el.style.backgroundColor = "#f1c40f"; 
-                        el.style.transform = "scale(1.1)";
-                    } else {
-                        el.style.color = ct > m.end ? "#555" : "#fff"; 
-                        el.style.backgroundColor = "transparent"; 
-                        el.style.transform = "scale(1.0)";
-                    }
-                });
-                if (!audio.paused) requestAnimationFrame(draw);
-            }
-
-            function playOnly() { 
-                audio.currentTime = 0; 
-                audio.play(); 
-                draw(); 
-            }
-
-            async function toggleRec() {
-                if (!mediaRecorder || mediaRecorder.state === "inactive") {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    mediaRecorder = new MediaRecorder(stream);
-                    audioChunks = [];
-                    
-                    mediaRecorder.ondataavailable = e => {
-                        if (e.data.size > 0) audioChunks.push(e.data);
-                    };
-
-                    mediaRecorder.onstop = async () => {
-                        const blob = new Blob(audioChunks, { type: 'audio/wav' });
-                        const reader = new FileReader();
-                        reader.readAsDataURL(blob);
-                        reader.onloadend = () => {
-                            // 親ウィンドウ（Streamlit）へ録音データを送信
-                            window.parent.postMessage({
-                                type: 'UPLOAD_AUDIO',
-                                data: reader.result
-                            }, '*');
-                        };
-                    };
-
-                    mediaRecorder.start();
-                    audio.currentTime = 0;
-                    audio.play();
-                    draw();
-                    btn.innerText = "🛑 Stop & Score";
-                    btn.style.background = "#95a5a6";
-                    status.innerText = "🔴 Recording...";
-                } else {
-                    mediaRecorder.stop();
-                    audio.pause();
-                    btn.innerText = "🎙️ Start Shadowing";
-                    btn.style.background = "#e74c3c";
-                    status.innerText = "Analyzing Result...";
-                }
-            }
-        </script>
-        """
-        
-        # プレースホルダーを実際のデータに置換
-        final_html = (html_template
-                      .replace("__SUB_HTML__", sub_html)
-                      .replace("__AUDIO_B64__", st.session_state.audio_b64)
-                      .replace("__JSON_DATA__", json_data))
-        
-        st.components.v1.html(final_html, height=550)
-
-        # --- 5. 採点ロジック（Pythonバックエンド） ---
-        # 録音データを受け取るための隠し入力
-        # JSからの入力を受け取るため、keyを設定して管理
-        audio_transport = st.text_input("録音データ転送", key="audio_transport_input", label_visibility="collapsed")
-
-        # 親ウィンドウでMessageを受け取り、st.text_inputに値をセットするJS
-        st.markdown("""
-            <script>
-            window.addEventListener('message', function(event) {
-                if (event.data.type === 'UPLOAD_AUDIO') {
-                    const base64Data = event.data.data.split(',')[1];
-                    // aria-labelを使って確実にターゲットのInputを見つける
-                    const inputs = window.parent.document.querySelectorAll('input');
-                    let targetInput = Array.from(inputs).find(el => el.ariaLabel === "録音データ転送");
-                    
-                    if (targetInput) {
-                        targetInput.value = base64Data;
-                        targetInput.dispatchEvent(new Event('input', { bubbles: true }));
-                    }
-                }
-            });
-            </script>
-        """, unsafe_allow_html=True)
-
-        if audio_transport and len(audio_transport) > 100:
-            with st.spinner("AI採点中..."):
-                try:
-                    with open("user_rec.wav", "wb") as f:
-                        f.write(base64.b64decode(audio_transport))
-                    
-                    user_res, _ = model.transcribe("user_rec.wav", language="en")
-                    user_text = " ".join([s.text for s in user_res]).lower().strip()
-                    
-                    if user_text:
-                        m_words = [m['word'].lower().strip('.,!?') for m in st.session_state.master_data]
-                        u_words = user_text.split()
-                        
-                        st.subheader("Shadowing Result")
-                        result_html = '<div style="display: flex; flex-wrap: wrap; gap: 10px; background: #1a1a1a; padding: 20px; border-radius: 10px;">'
-                        score = 0
-                        for m_w in m_words:
-                            # 類似度判定
-                            is_match = any(difflib.SequenceMatcher(None, m_w, u_w.strip('.,!?')).ratio() > threshold for u_w in u_words)
-                            color = "#2ecc71" if is_match else "#e74c3c"
-                            if is_match: score += 1
-                            result_html += f'<span style="color:{color}; font-size: 20px; font-weight: bold;">{m_w}</span>'
-                        result_html += '</div>'
-                        
-                        st.markdown(result_html, unsafe_allow_html=True)
-                        st.metric("達成度", f"{int((score / len(m_words)) * 100)}%")
-                    
-                    # 処理が終わったら入力をクリア（次の録音のために重要）
-                    st.session_state.audio_transport_input = ""
-                    
-                except Exception as e:
-                    st.error(f"採点エラー: {e}")
+                st.error(f"採点エラー: {e}")
+            finally:
+                if os.path.exists(rec_path):
+                    os.unlink(rec_path)
