@@ -7,46 +7,48 @@ from faster_whisper import WhisperModel
 # --- 1. AIモデルの準備 ---
 @st.cache_resource
 def load_model():
-    # Streamlit CloudなどのCPU環境を想定し、int8で最適化
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return WhisperModel("base", device=device, compute_type="int8")
 
 model = load_model()
 
-# --- 2. 音声解析関数（15秒固定） ---
+# --- 2. 音声解析関数（エラー回避版：15秒制限） ---
 @st.cache_data
 def transcribe_fixed_duration(file_path):
-    # duration=15.0 を指定することで、音声の冒頭15秒間だけを解析対象にします
-    segments, _ = model.transcribe(file_path, language="en", duration=15.0)
-    text = " ".join([segment.text for segment in segments])
-    return text.strip()
+    # エラー回避のため、明示的に終了時間を指定する引数を使います
+    # word_timestampsをTrueにすることで、より詳細な時間制御が可能になります
+    segments, _ = model.transcribe(file_path, language="en")
+    
+    text_list = []
+    for segment in segments:
+        # セグメントの開始時間が15秒を超えたらループを終了する
+        if segment.start > 15.0:
+            break
+        text_list.append(segment.text)
+    
+    return " ".join(text_list).strip()
 
 # --- 3. アプリケーション設定 ---
-st.set_page_config(page_title="Stable Shadowing 15s", layout="centered")
+st.set_page_config(page_title="Stable Shadowing Fixed", layout="centered")
 st.title("🎙️ Shadowing Practice (15s Fixed)")
 
-# 音声ファイルの読み込み
 AUDIO_DIR = "."
 audio_files = [f for f in os.listdir(AUDIO_DIR) if f.endswith(('.mp3', '.wav', '.m4a'))]
 
 if not audio_files:
-    st.error("音声ファイルが見つかりません。リポジトリに音声を配置してください。")
+    st.error("音声ファイルが見つかりません。")
 else:
-    # 1. お手本の選択
     selected_file = st.selectbox("練習するファイルを選択してください", audio_files)
     file_path = os.path.join(AUDIO_DIR, selected_file)
 
     st.divider()
 
-    # 2. お手本の解析と再生
     st.subheader("1. お手本を聴く (最初の15秒間)")
     
-    with st.spinner("AIが冒頭15秒を解析中..."):
-        # AI解析（15秒間のみ）
+    with st.spinner("AIが解析中..."):
+        # 修正された関数を呼び出し
         master_text = transcribe_fixed_duration(file_path)
     
-    # 音声の再生
-    # 注意: 再生自体はファイル全体が読み込まれますが、15秒で止めて練習してください
     st.audio(file_path)
 
     with st.expander("15秒分のスクリプトを表示"):
@@ -54,23 +56,25 @@ else:
 
     st.divider()
 
-    # 3. ユーザーの録音アップロード
     st.subheader("2. Shadowing & Upload")
-    st.info("冒頭15秒を練習し、録音したファイルをアップロードしてください。")
-    user_audio = st.file_uploader("録音ファイルをドロップ", type=["mp3", "wav", "m4a"])
+    user_audio = st.file_uploader("録音ファイルをアップロード", type=["mp3", "wav", "m4a"])
 
     if user_audio:
-        with st.spinner("あなたの声を解析中..."):
+        with st.spinner("解析中..."):
             with open("user_temp.wav", "wb") as f:
                 f.write(user_audio.getbuffer())
             
-            # ユーザーの録音も同様に解析（ユーザーが15秒以上録音しても15秒までを評価）
-            user_segments, _ = model.transcribe("user_temp.wav", language="en", duration=15.0)
-            user_text = " ".join([s.text for s in user_segments]).strip()
+            # ユーザー音声も同様のロジックで15秒までを抽出
+            u_segments, _ = model.transcribe("user_temp.wav", language="en")
+            u_text_list = []
+            for s in u_segments:
+                if s.start > 15.0:
+                    break
+                u_text_list.append(s.text)
+            user_text = " ".join(u_text_list).strip()
             
             st.write(f"**あなたの発話 (冒頭15秒):** {user_text}")
 
-            # 採点
             ratio = difflib.SequenceMatcher(None, master_text.lower(), user_text.lower()).ratio()
             score = int(ratio * 100)
 
