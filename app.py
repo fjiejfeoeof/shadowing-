@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import time
 import difflib
 import torch
 from faster_whisper import WhisperModel
@@ -8,114 +9,143 @@ import io
 # --- 1. AIモデルの準備 ---
 @st.cache_resource
 def load_model():
+    # Streamlit Cloud環境を考慮し、CPUでも動くint8量子化モデルを使用
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # CPU環境でも軽量に動くようint8量子化を使用
     return WhisperModel("base", device=device, compute_type="int8")
 
 model = load_model()
 
-# --- 2. 解析・比較ロジック ---
+# --- 2. 解析ロジック ---
 @st.cache_data
-def transcribe_fixed_15s(audio_data):
+def get_master_data(file_path):
     """
-    音声データを解析し、冒頭15秒分のテキストを返す
-    audio_data: ファイルパスまたはバイトデータ
+    お手本音声を解析し、単語ごとのタイミング情報を取得する
     """
-    segments, _ = model.transcribe(audio_data, language="en")
-    
-    text_list = []
+    segments, _ = model.transcribe(file_path, word_timestamps=True, language="en")
+    words_data = []
+    full_text = ""
     for segment in segments:
-        if segment.start > 15.0:
-            break
-        text_list.append(segment.text.strip())
-    
-    return " ".join(text_list).strip()
+        full_text += segment.text + " "
+        for word in segment.words:
+            # 15秒制限
+            if word.start > 15.0:
+                break
+            words_data.append({"word": word.word.strip(), "start": word.start, "end": word.end})
+    return words_data, full_text.strip()
 
-def get_visual_diff(master, user):
+def get_diff_markdown(master_text, user_text):
     """
-    お手本とユーザーの発話を比較し、マークダウン形式のハイライトを生成する
+    マークダウン記法のみで差分を視覚化する
     """
-    master_words = master.lower().replace('.', '').replace(',', '').split()
-    user_words = user.lower().replace('.', '').replace(',', '').split()
+    m_words = master_text.lower().replace('.', '').replace(',', '').split()
+    u_words = user_text.lower().replace('.', '').replace(',', '').split()
     
-    # お手本をベースに、ユーザーが言えなかった単語を赤色にする
-    result_md = []
-    user_set = set(user_words)
+    result = []
+    user_set = set(u_words)
     
-    for word in master_words:
-        # 簡易的な一致確認（より厳密にする場合はSequenceMatcherを使用）
+    for word in m_words:
         if word in user_set:
-            result_md.append(word)
+            result.append(word)
         else:
-            # ユーザーが発話できなかった単語を赤色＋太字
-            result_md.append(f"**:red[{word}]**")
-            
-    return " ".join(result_md)
+            # 言えなかった単語を赤文字＋打ち消し線（Streamlit標準記法）
+            result.append(f"~~:red[{word}]~~")
+    return " ".join(result)
 
-# --- 3. UI設定 ---
-st.set_page_config(page_title="Shadowing Studio Pro", layout="centered")
-st.title("🎙️ Shadowing Studio (Visual Feedback)")
+# --- 3. メインUI ---
+st.set_page_config(page_title="Standard Prompter Studio", layout="centered")
+st.title("🎙️ Shadowing Prompter Studio")
 
-# 音声ファイル読み込み（GitHubリポジトリ内のファイルを想定）
+# ファイル選択
 AUDIO_DIR = "."
 audio_files = [f for f in os.listdir(AUDIO_DIR) if f.endswith(('.mp3', '.wav', '.m4a'))]
 
 if not audio_files:
-    st.error("音声ファイルが見つかりません。sample1.mp3 などを配置してください。")
+    st.error("音声ファイルが見つかりません。リポジトリに配置してください。")
 else:
-    # 1. お手本の選択
-    selected_name = st.selectbox("練習するファイルを選択:", audio_files)
-    file_path = os.path.join(AUDIO_DIR, selected_name)
+    selected_file = st.selectbox("練習するファイルを選択:", audio_files)
+    file_path = os.path.join(AUDIO_DIR, selected_file)
+
+    # データ準備
+    with st.spinner("AIがプロンプトを生成中..."):
+        master_words, master_full_text = get_master_data(file_path)
 
     st.divider()
 
-    # 2. お手本の解析と再生
-    st.subheader("1. お手本を聴く (15秒)")
-    with st.spinner("AIが解析中..."):
-        master_text = transcribe_fixed_15s(file_path)
+    # --- プロンプター機能 ---
+    st.subheader("1. プロンプター連動再生")
+    st.info("再生ボタンを押すと、プロンプターが動き出します。")
     
+    # プロンプター表示用のプレースホルダー
+    current_word_placeholder = st.empty()
+    next_word_placeholder = st.empty()
+    progress_bar = st.progress(0)
+    
+    # 音声プレイヤー
     st.audio(file_path)
-    with st.expander("お手本の全スクリプトを確認"):
-        st.write(master_text)
+    
+    # 再生と同期するためのトリガー
+    if st.button("プロンプターをスタート"):
+        start_time = time.time()
+        total_duration = 15.0 # 練習制限時間
+        
+        # 0.1秒刻みで画面を更新するループ（Python制御）
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > total_duration:
+                break
+            
+            # 現在の単語と「0.5秒先」の予見単語を探す
+            current_w = ""
+            next_w = ""
+            
+            for i, w in enumerate(master_words):
+                # 約0.5秒前に予見表示するための判定
+                if w.start - 0.5 <= elapsed <= w.end:
+                    current_w = f"### NOW: :orange[{w.word}]"
+                    if i + 1 < len(master_words):
+                        next_w = f"Next: {master_words[i+1]['word']}"
+                    break
+            
+            # 画面更新
+            current_word_placeholder.markdown(current_w if current_w else "### ---")
+            next_word_placeholder.text(next_w if next_w else "")
+            
+            # プログレスバー更新（視覚的ガイド）
+            progress_bar.progress(min(elapsed / total_duration, 1.0))
+            
+            time.sleep(0.05) # CPU負荷を抑えつつ滑らかに更新
+        
+        st.success("再生終了")
 
     st.divider()
 
-    # 3. ブラウザ直接録音 (st.audio_input)
+    # --- 録音・採点機能 ---
     st.subheader("2. あなたのシャドーイング")
-    st.info("下のマイクボタンを押して録音を開始してください（最大15秒）")
-    recorded_audio = st.audio_input("録音を開始")
+    recorded_audio = st.audio_input("録音を開始（最大15秒）")
 
-    # 4. 解析と視覚的フィードバック
     if recorded_audio:
-        with st.spinner("あなたの声をAIが分析中..."):
-            # st.audio_input からのバイトデータを直接 Whisper に渡す
-            # 一旦 io.BytesIO でメモリ上に保持
-            user_text = transcribe_fixed_15s(io.BytesIO(recorded_audio.read()))
+        with st.spinner("AI採点中..."):
+            # ユーザー音声解析
+            u_segments, _ = model.transcribe(io.BytesIO(recorded_audio.read()), language="en")
+            user_text = " ".join([s.text for s in u_segments if s.start <= 15.0]).strip()
             
-            # --- 採点 ---
-            ratio = difflib.SequenceMatcher(None, master_text.lower(), user_text.lower()).ratio()
-            score = int(ratio * 100)
+            # 採点
+            score = int(difflib.SequenceMatcher(None, master_full_text.lower(), user_text.lower()).ratio() * 100)
             
-            # --- フィードバック表示 ---
-            st.subheader("3. 採点結果")
-            st.metric(label="一致率", value=f"{score}%")
-            
-            # 比較表示
+            st.metric("一致率", f"{score}%")
+
+            # 視覚的フィードバック（上下比較）
             st.write("### 視覚的フィードバック")
-            st.caption("赤文字：聞き取れなかった、または発音ミスがあった箇所")
             
-            diff_display = get_visual_diff(master_text, user_text)
-            st.markdown(f"> {diff_display}")
-            
-            # 上下比較
-            st.write("---")
+            # 差分ハイライト
+            diff_md = get_diff_markdown(master_full_text, user_text)
+            st.markdown(f"> {diff_md}")
+            st.caption("赤色＋打ち消し線：聞き取り不明、または飛ばした箇所")
+
             col1, col2 = st.columns(2)
             with col1:
-                st.write("**[1. お手本テキスト]**")
-                st.info(master_text)
+                st.markdown("**[お手本]**")
+                st.info(master_full_text)
             with col2:
-                st.write("**[2. あなたの発話]**")
-                st.success(user_text if user_text else "(音声が聞き取れませんでした)")
-
-            if score >= 80:
-                st.balloons()
+                st.markdown("**[あなたの発話]**")
+                st.success(user_text if user_text else "音が聞き取れませんでした")
