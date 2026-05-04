@@ -14,29 +14,23 @@ def load_model():
 
 model = load_model()
 
-# --- 2. 解析ロジック（エラー回避版：セグメント単位） ---
+# --- 2. 解析ロジック（エラー根絶版） ---
 @st.cache_data
 def get_master_data(file_path):
-    # word_timestampsを使わず、標準的なsegmentsのみを使用
+    # 生のsegmentオブジェクトをリストとして保持する
     segments, _ = model.transcribe(file_path, language="en")
     
-    display_data = []
+    # リスト化してキャッシュに安全に保存（15秒分）
+    seg_list = []
     full_text_list = []
-    
-    for segment in segments:
-        if segment.start > 15.0:
+    for s in segments:
+        if s.start > 15.0:
             break
-        # セグメント（一塊の文章）単位でリスト化
-        display_data.append({
-            "text": segment.text.strip(),
-            "start": segment.start,
-            "end": segment.end
-        })
-        full_text_list.append(segment.text.strip())
+        seg_list.append(s)
+        full_text_list.append(s.text.strip())
     
-    return display_data, " ".join(full_text_list)
+    return seg_list, " ".join(full_text_list)
 
-# 差分表示用の関数（前回と同じ）
 def get_diff_markdown(master, user):
     m_words = master.lower().replace('.', '').replace(',', '').split()
     u_words = user.lower().replace('.', '').replace(',', '').split()
@@ -45,8 +39,8 @@ def get_diff_markdown(master, user):
     return " ".join(result)
 
 # --- 3. メインUI ---
-st.set_page_config(page_title="Shadowing Prompter Fixed", layout="centered")
-st.title("🎙️ Shadowing Prompter (Fixed Edition)")
+st.set_page_config(page_title="Shadowing Prompter Final", layout="centered")
+st.title("🎙️ Shadowing Prompter (Stable Edition)")
 
 AUDIO_DIR = "."
 audio_files = [f for f in os.listdir(AUDIO_DIR) if f.endswith(('.mp3', '.wav', '.m4a'))]
@@ -64,8 +58,6 @@ else:
 
     # --- プロンプター機能 ---
     st.subheader("1. プロンプター連動再生")
-    
-    # プレースホルダーの設置
     prompt_area = st.empty()
     progress_bar = st.progress(0)
     
@@ -78,39 +70,37 @@ else:
             elapsed = time.time() - start_time
             if elapsed > 15.0: break
             
-            current_phrase = ""
-            next_phrase = ""
+            now_text = ""
+            next_text = ""
             
             for i, s in enumerate(master_segments):
-                # 0.5秒前に次のフレーズを表示するロジック
+                # .start と .end という「属性」を正しく参照
                 if s.start - 0.5 <= elapsed <= s.end:
-                    current_phrase = f"### NOW: :orange[{s.text}]"
+                    now_text = f"### NOW: :orange[{s.text}]"
                     if i + 1 < len(master_segments):
-                        next_phrase = f"Next: {master_segments[i+1]['text']}"
+                        next_text = f"Next: {master_segments[i+1].text}"
                     break
             
-            # 表示更新
-            # current_phraseがない（無音区間など）場合は前の表示をクリア
             with prompt_area.container():
-                st.markdown(current_phrase if current_phrase else "### (Listening...)")
-                if next_phrase:
-                    st.caption(next_phrase)
+                st.markdown(now_text if now_text else "### (Ready...)")
+                if next_text:
+                    st.caption(next_text)
             
             progress_bar.progress(min(elapsed / 15.0, 1.0))
-            time.sleep(0.1)
+            time.sleep(0.05) # 更新頻度を上げてより滑らかに
         
-        st.success("終了！下のマイクで録音してください。")
+        st.success("終了！")
 
     st.divider()
 
-    # --- 録音・採点（前回と同様） ---
+    # --- 録音・採点 ---
     st.subheader("2. Shadowing & Result")
     recorded_audio = st.audio_input("録音を開始")
 
     if recorded_audio:
         with st.spinner("採点中..."):
-            u_segments, _ = model.transcribe(io.BytesIO(recorded_audio.read()), language="en")
-            user_text = " ".join([s.text for s in u_segments if s.start <= 15.0]).strip()
+            u_segs, _ = model.transcribe(io.BytesIO(recorded_audio.read()), language="en")
+            user_text = " ".join([s.text for s in u_segs if s.start <= 15.0]).strip()
             
             score = int(difflib.SequenceMatcher(None, master_full_text.lower(), user_text.lower()).ratio() * 100)
             
